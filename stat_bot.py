@@ -10,7 +10,7 @@ import telebot
 from telebot import apihelper
 
 # ===== НАСТРОЙКИ =====
-TOKEN = "1163348874:AAFgZEXveILvD4MbhQ8jiLTwIxs4puYhmq0"
+TOKEN = "8596594907:AAHUQjk-ik3LGV7kI-4XhCn-fw1T-FHo6wU"
 CHANNEL_ID = "-1003477065559"
 MAIN_URL = "https://1xlite-9048339.bar/ru/live/twentyone/1643503-twentyone-game"
 MAX_BROWSERS = 2
