@@ -207,6 +207,7 @@ async function checkGamesData(games){
   }
 }
 
+// ===== ИСПРАВЛЕННЫЕ ФУНКЦИИ =====
 async function checkGame(id) {
   try {
     return await rp.get({
@@ -215,7 +216,8 @@ async function checkGame(id) {
       timeout: 150,
     });
   } catch (err) {
-    if (err.cause.code === 'ECONNREFUSED') return null;
+    console.log('Ошибка запроса игры:', err?.message || 'Неизвестная ошибка');
+    return null; // Всегда возвращаем null при ошибке
   }
 }
 
@@ -227,14 +229,19 @@ async function checkGames(){
       timeout: 150,
     });    
   } catch (err) {
-    if (err.cause.code === 'ECONNREFUSED') return null;
+    console.log('Ошибка запроса к 1xbet:', err?.message || 'Неизвестная ошибка');
+    return null; // Всегда возвращаем null при ошибке
   }
 }
 
 async function getGames(){
-  const games = await checkGames();
-  if (!games) return null;
   try {
+    const games = await checkGames();
+    if (!games) {
+      console.log('Нет данных от 1xbet, ждём...');
+      return null;
+    }
+    
     const gamesObject = JSON.parse(games);
     if (
         gamesObject
@@ -247,8 +254,8 @@ async function getGames(){
       }
     }
   } catch (error) {
-    sendError(error);
-    return 0;
+    console.log('Ошибка при обработке игр:', error?.message || 'Неизвестная ошибка');
+    return null;
   }
 }
 
