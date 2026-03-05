@@ -98,111 +98,122 @@ function signals(cart, game, sp){
 async function checkGamesData(games){
   const game = await checkGame(games.I);
   if (!game) return null;
-  const gameObject = JSON.parse(game);
+  
+  let gameObject;
+  try {
+    gameObject = JSON.parse(game);
+  } catch (e) {
+    console.log('Ошибка парсинга JSON');
+    return null;
+  }
 
-  if (gameObject.Value) {
-    const state = gameObject.Value.SC.S[2].Value;
-    if (['3','4','5'].includes(state)) {
-      const P1 = JSON.parse(gameObject.Value.SC.S[0].Value);
-      const P2 = JSON.parse(gameObject.Value.SC.S[1].Value);
-      let P1text ='';
-      let P2text ='';
-      let endPhrase = '';
-      if (P1.length === 2 && P2.length === 2){
-        endPhrase = '#R ';
-        if (P1[0].CV === P1[1].CV && P1[1].CV === 14) endPhrase += '#G ';
-        if (P2[0].CV === P2[1].CV && P2[1].CV === 14) endPhrase += '#G ';
-      }
-      const carts = {};
-      let sp = false;
-      for (let index = 0; index < P1.length; index++) {
-        const card = P1[index];
-        P1text += `${cardValue[card.CV]}${mast[card.CS]}`;
-        if (!sp) sp = card.CV === 6 && card.CS === 0;
-        carts[card.CV] = carts[card.CV]
-          ? carts[card.CV] += 1 : carts[card.CV] = 1;
-      }
-      for (let index = 0; index < P2.length; index++) {
-        const card = P2[index];
-        P2text += `${cardValue[card.CV]}${mast[card.CS]}`;
-        if (!sp) sp = card.CV === 6 && card.CS === 0;
-        carts[card.CV] = carts[card.CV]
-          ? carts[card.CV] += 1 : carts[card.CV] = 1;
-      }
-      if (gameObject.Value.SC.FS.S1 === gameObject.Value.SC.FS.S2) {
-        endPhrase += '#N';
-      }
-      let msg = `[${gameObject.Value.DI}]: ${gameObject.Value.SC.FS.S1}:(${P1text}) - ${gameObject.Value.SC.FS.S2}:(${P2text})${endPhrase}`;
-      if (activeMsg[gameObject.Value.DI] && activeMsg[gameObject.Value.DI].sended) {
-        if (activeMsg[gameObject.Value.DI].msg !== msg) {
-          signals(carts, gameObject.Value.DI, sp);
+  if (gameObject && gameObject.Value) {
+    try {
+      const state = gameObject.Value.SC.S[2].Value;
+      if (['3','4','5'].includes(state)) {
+        const P1 = JSON.parse(gameObject.Value.SC.S[0].Value);
+        const P2 = JSON.parse(gameObject.Value.SC.S[1].Value);
+        let P1text ='';
+        let P2text ='';
+        let endPhrase = '';
+        if (P1.length === 2 && P2.length === 2){
+          endPhrase = '#R ';
+          if (P1[0].CV === P1[1].CV && P1[1].CV === 14) endPhrase += '#G ';
+          if (P2[0].CV === P2[1].CV && P2[1].CV === 14) endPhrase += '#G ';
+        }
+        const carts = {};
+        let sp = false;
+        for (let index = 0; index < P1.length; index++) {
+          const card = P1[index];
+          P1text += `${cardValue[card.CV]}${mast[card.CS]}`;
+          if (!sp) sp = card.CV === 6 && card.CS === 0;
+          carts[card.CV] = carts[card.CV]
+            ? carts[card.CV] += 1 : carts[card.CV] = 1;
+        }
+        for (let index = 0; index < P2.length; index++) {
+          const card = P2[index];
+          P2text += `${cardValue[card.CV]}${mast[card.CS]}`;
+          if (!sp) sp = card.CV === 6 && card.CS === 0;
+          carts[card.CV] = carts[card.CV]
+            ? carts[card.CV] += 1 : carts[card.CV] = 1;
+        }
+        if (gameObject.Value.SC.FS.S1 === gameObject.Value.SC.FS.S2) {
+          endPhrase += '#N';
+        }
+        let msg = `[${gameObject.Value.DI}]: ${gameObject.Value.SC.FS.S1}:(${P1text}) - ${gameObject.Value.SC.FS.S2}:(${P2text})${endPhrase}`;
+        if (activeMsg[gameObject.Value.DI] && activeMsg[gameObject.Value.DI].sended) {
+          if (activeMsg[gameObject.Value.DI].msg !== msg) {
+            signals(carts, gameObject.Value.DI, sp);
+            editMessage(msg, activeMsg[gameObject.Value.DI]);
+            delete activeMsg[gameObject.Value.DI];
+          }
+          return null;
+        }
+        if (activeMsg[gameObject.Value.DI] && !activeMsg[gameObject.Value.DI].sended) {
+          if (!activeMsg[gameObject.Value.DI].msg || activeMsg[gameObject.Value.DI].msg !== msg) {
+            signals(carts, gameObject.Value.DI, sp);
+            sendMessage(msg);
+            delete activeMsg[gameObject.Value.DI];
+          }
+          return null;
+        }
+      } else if (['1','2'].includes(state)) {
+        const P1 = JSON.parse(gameObject.Value.SC.S[0].Value);
+        const P2 = JSON.parse(gameObject.Value.SC.S[1].Value);
+        let P1text ='';
+        let P2text ='';
+        for (let index = 0; index < P1.length; index++) {
+          const card = P1[index];
+          P1text += `${cardValue[card.CV]}${mast[card.CS]}`;
+        }
+        for (let index = 0; index < P2.length; index++) {
+          const card = P2[index];
+          P2text += `${cardValue[card.CV]}${mast[card.CS]}`;
+        }
+        let msg = `⏱[${gameObject.Value.DI}]: ${gameObject.Value.SC.FS.S1}:(${P1text}) - ${gameObject.Value.SC.FS.S2}:(${P2text})`;
+        if (
+          activeMsg[gameObject.Value.DI]
+            && !activeMsg[gameObject.Value.DI].locked
+            && !activeMsg[gameObject.Value.DI].sended
+          ) {
+          activeMsg[gameObject.Value.DI] = {
+            sended: true,
+            msg,
+            locked: true,
+          };
+          chat = await sendMessage(msg);
+          return activeMsg[gameObject.Value.DI] = {
+            sended: true,
+            msg,
+            locked: false,
+            ...chat,
+          };
+        }
+        if (
+          activeMsg[gameObject.Value.DI]
+            && !activeMsg[gameObject.Value.DI].locked
+            && activeMsg[gameObject.Value.DI].sended) {
+          if (activeMsg[gameObject.Value.DI].msg === msg) return;
           editMessage(msg, activeMsg[gameObject.Value.DI]);
-          delete activeMsg[gameObject.Value.DI];
+          return activeMsg[gameObject.Value.DI] = {
+            ...activeMsg[gameObject.Value.DI],
+            sended: true,
+            msg,
+            locked: false,
+          };
         }
-        return null;
-      }
-      if (activeMsg[gameObject.Value.DI] && !activeMsg[gameObject.Value.DI].sended) {
-        if (!activeMsg[gameObject.Value.DI].msg || activeMsg[gameObject.Value.DI].msg !== msg) {
-          signals(carts, gameObject.Value.DI, sp);
-          sendMessage(msg);
-          delete activeMsg[gameObject.Value.DI];
-        }
-        return null;
-      }
-    } else if (['1','2'].includes(state)) {
-      const P1 = JSON.parse(gameObject.Value.SC.S[0].Value);
-      const P2 = JSON.parse(gameObject.Value.SC.S[1].Value);
-      let P1text ='';
-      let P2text ='';
-      for (let index = 0; index < P1.length; index++) {
-        const card = P1[index];
-        P1text += `${cardValue[card.CV]}${mast[card.CS]}`;
-      }
-      for (let index = 0; index < P2.length; index++) {
-        const card = P2[index];
-        P2text += `${cardValue[card.CV]}${mast[card.CS]}`;
-      }
-      let msg = `⏱[${gameObject.Value.DI}]: ${gameObject.Value.SC.FS.S1}:(${P1text}) - ${gameObject.Value.SC.FS.S2}:(${P2text})`;
-      if (
-        activeMsg[gameObject.Value.DI]
-          && !activeMsg[gameObject.Value.DI].locked
-          && !activeMsg[gameObject.Value.DI].sended
-        ) {
+      } else if (state === '0') {
+        if (!!activeMsg[gameObject.Value.DI] ) return;
         activeMsg[gameObject.Value.DI] = {
-          sended: true,
-          msg,
-          locked: true,
+          sended: false,
+          msg: ''
         };
-        chat = await sendMessage(msg);
-        return activeMsg[gameObject.Value.DI] = {
-          sended: true,
-          msg,
-          locked: false,
-          ...chat,
-        };
+        // ToDo новая игра
+      } else {
+        console.log(state, JSON.stringify(state));
       }
-      if (
-        activeMsg[gameObject.Value.DI]
-          && !activeMsg[gameObject.Value.DI].locked
-          && activeMsg[gameObject.Value.DI].sended) {
-        if (activeMsg[gameObject.Value.DI].msg === msg) return;
-        editMessage(msg, activeMsg[gameObject.Value.DI]);
-        return activeMsg[gameObject.Value.DI] = {
-          ...activeMsg[gameObject.Value.DI],
-          sended: true,
-          msg,
-          locked: false,
-        };
-      }
-    } else if (state === '0') {
-      if (!!activeMsg[gameObject.Value.DI] ) return;
-      activeMsg[gameObject.Value.DI] = {
-        sended: false,
-        msg: ''
-      };
-      // ToDo новая игра
-    } else {
-      console.log(state, JSON.stringify(state));
+    } catch (e) {
+      console.log('Ошибка при обработке игры:', e.message);
     }
   }
 }
@@ -216,8 +227,9 @@ async function checkGame(id) {
       timeout: 150,
     });
   } catch (err) {
-    console.log('Ошибка запроса игры:', err?.message || 'Неизвестная ошибка');
-    return null; // Всегда возвращаем null при ошибке
+    // Просто логируем и возвращаем null при любой ошибке
+    console.log('Ошибка при запросе игры');
+    return null;
   }
 }
 
@@ -229,8 +241,9 @@ async function checkGames(){
       timeout: 150,
     });    
   } catch (err) {
-    console.log('Ошибка запроса к 1xbet:', err?.message || 'Неизвестная ошибка');
-    return null; // Всегда возвращаем null при ошибке
+    // Просто логируем и возвращаем null при любой ошибке
+    console.log('Ошибка при запросе к 1xbet');
+    return null;
   }
 }
 
@@ -238,11 +251,18 @@ async function getGames(){
   try {
     const games = await checkGames();
     if (!games) {
-      console.log('Нет данных от 1xbet, ждём...');
+      // Не логируем каждую секунду, просто возвращаем null
       return null;
     }
     
-    const gamesObject = JSON.parse(games);
+    let gamesObject;
+    try {
+      gamesObject = JSON.parse(games);
+    } catch (e) {
+      console.log('Ошибка парсинга JSON');
+      return null;
+    }
+    
     if (
         gamesObject
         && gamesObject.Value
@@ -254,7 +274,7 @@ async function getGames(){
       }
     }
   } catch (error) {
-    console.log('Ошибка при обработке игр:', error?.message || 'Неизвестная ошибка');
+    console.log('Ошибка при обработке игр');
     return null;
   }
 }
@@ -266,15 +286,23 @@ async function startCheck() {
 }
 
 async function sendError(err) {
-    console.log('Send error: ' +  err);
+    console.log('Send error');
 }
 
 async function sendMessage(msg) {
+  try {
     return await bot.sendMessage(tSubscryber, msg);
+  } catch (e) {
+    console.log('Ошибка отправки сообщения');
+  }
 }
 
 async function editMessage(msg, chat) {
+  try {
     return await bot.editMessageText(msg, { ...chat, chat_id: chat.chat.id, message_id: chat.message_id });
+  } catch (e) {
+    console.log('Ошибка редактирования сообщения');
+  }
 }
 
 function checkEnvironments(key) {
