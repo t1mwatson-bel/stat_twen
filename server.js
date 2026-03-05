@@ -218,21 +218,7 @@ async function checkGamesData(games){
   }
 }
 
-// ===== ИСПРАВЛЕННЫЕ ФУНКЦИИ =====
-async function checkGame(id) {
-  try {
-    return await rp.get({
-      uri: `${rootUrl}${action.game}`,
-      qs: { id ,...gameConsts },
-      timeout: 150,
-    });
-  } catch (err) {
-    // Просто логируем и возвращаем null при любой ошибке
-    console.log('Ошибка при запросе игры');
-    return null;
-  }
-}
-
+// ===== ИСПРАВЛЕННАЯ ФУНКЦИЯ =====
 async function checkGames(){
   try {
     return await rp.get({
@@ -241,8 +227,22 @@ async function checkGames(){
       timeout: 150,
     });    
   } catch (err) {
-    // Просто логируем и возвращаем null при любой ошибке
-    console.log('Ошибка при запросе к 1xbet');
+    // Безопасная обработка ошибки
+    console.log('Ошибка запроса к 1xbet');
+    return null;
+  }
+}
+
+// ===== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ КОНКРЕТНОЙ ИГРЫ =====
+async function checkGame(id) {
+  try {
+    return await rp.get({
+      uri: `${rootUrl}${action.game}`,
+      qs: { id ,...gameConsts },
+      timeout: 150,
+    });
+  } catch (err) {
+    console.log('Ошибка запроса игры');
     return null;
   }
 }
@@ -251,7 +251,7 @@ async function getGames(){
   try {
     const games = await checkGames();
     if (!games) {
-      // Не логируем каждую секунду, просто возвращаем null
+      // Просто выходим, без лишних логов
       return null;
     }
     
