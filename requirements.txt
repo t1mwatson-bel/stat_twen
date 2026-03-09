@@ -1,2 +1,5 @@
-playwright
-telebot
+pyTelegramBotAPI==4.16.1
+scikit-learn
+pandas
+numpy
+requests
