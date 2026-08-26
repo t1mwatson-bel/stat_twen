@@ -3,7 +3,7 @@ import sys
 import requests
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # =====================================================================
@@ -11,11 +11,11 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🧪 ТЕСТОВЫЙ БОТ: ПРОГНОЗ ПО ЗАДЕРЖКЕ (СКРЫТЫЙ)", flush=True)
+print("🔮 ПРОГНОЗ ПО ЗАДЕРЖКЕ (С ОТПРАВКОЙ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
-# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (БЕРУТСЯ С ХОСТИНГА)
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
 # =====================================================================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
@@ -38,8 +38,6 @@ print("✅ Все переменные заданы!", flush=True)
 # НАСТРОЙКИ
 # =====================================================================
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-
-# Адрес API (рабочее зеркало)
 BASE_URL = "https://1xlite-36553.pro"
 
 HEADERS = {
@@ -53,35 +51,36 @@ SUITS_NAMES = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
 RANKS = {1: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
 
 # =====================================================================
-# КЭШ ДЛЯ ТЕСТА
+# НОМЕР ИГРЫ (от 03:00)
 # =====================================================================
-test_results = {
-    "total": 0,
-    "correct": 0
-}
+def get_game_number():
+    now = datetime.now(MOSCOW_TZ)
+    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now < start:
+        start = start - timedelta(days=1)
+    diff_minutes = (now - start).total_seconds() / 60
+    game_number = int(diff_minutes) // 2 % 720 + 1
+    return game_number
 
 # =====================================================================
-# ФУНКЦИИ ПРОГНОЗА ПО ЗАДЕРЖКЕ (СКРЫТАЯ)
+# ФУНКЦИИ ОТПРАВКИ
 # =====================================================================
-def predict_suit_by_latency(latency):
-    """
-    Скрытая функция прогноза масти по задержке.
-    Задержка НЕ ВЫВОДИТСЯ в сообщения.
-    """
-    # ПРИМЕРНАЯ ЗАВИСИМОСТЬ (на основе твоих данных)
-    if 93 <= latency < 96:
-        return "♥️"
-    elif 96 <= latency < 99:
-        return "♠️"
-    elif 99 <= latency < 102:
-        return "♦️"
-    elif 102 <= latency < 105:
-        return "♣️"
-    else:
-        return None  # Неопределённость
+def send_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            return response.json()["result"]["message_id"]
+        else:
+            print(f"❌ Ошибка отправки: {response.status_code} - {response.text}", flush=True)
+            return None
+    except Exception as e:
+        print(f"❌ Ошибка отправки: {e}", flush=True)
+        return None
 
 # =====================================================================
-# ФУНКЦИИ РАБОТЫ С API
+# ФУНКЦИИ API
 # =====================================================================
 def get_active_games():
     try:
@@ -95,7 +94,6 @@ def get_active_games():
                 games = data
             else:
                 return []
-            
             active_games = []
             for game in games:
                 if game.get("liga", {}).get("id") == 2092323:
@@ -116,7 +114,6 @@ def get_game_data(game_id):
         response = requests.get(url, headers=HEADERS, timeout=5)
         end_time = time.time()
         latency = (end_time - start_time) * 1000
-        
         if response.status_code == 200:
             return response.json(), latency, start_time, end_time
         else:
@@ -130,7 +127,6 @@ def parse_cards_and_state(data):
     player_cards = []
     dealer_cards = []
     state = None
-    
     for item in sc.get("S", []):
         if item.get("Key") == "P1":
             try:
@@ -144,11 +140,9 @@ def parse_cards_and_state(data):
                 dealer_cards = []
         if item.get("Key") == "STATE":
             state = item.get("Value")
-    
     return player_cards, dealer_cards, state
 
 def get_suits_from_cards(cards):
-    """Извлекает масти из карт"""
     suits = []
     for card in cards:
         cs = card.get("CS", 0)
@@ -156,92 +150,91 @@ def get_suits_from_cards(cards):
         suits.append(suit)
     return suits
 
+def predict_suit_by_latency(latency):
+    if 93 <= latency < 96:
+        return "♥️"
+    elif 96 <= latency < 99:
+        return "♠️"
+    elif 99 <= latency < 102:
+        return "♦️"
+    elif 102 <= latency < 105:
+        return "♣️"
+    else:
+        return None
+
 # =====================================================================
-# ОСНОВНОЙ ЦИКЛ ТЕСТА
+# ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def main():
-    print("🔄 ТЕСТОВЫЙ БОТ ЗАПУЩЕН (ПРОГНОЗ ПО ЗАДЕРЖКЕ)", flush=True)
-    print("📌 Задержка НЕ выводится в сообщения, только в логах", flush=True)
+    print("🔄 БОТ ЗАПУЩЕН (ПРОГНОЗ С ОТПРАВКОЙ)", flush=True)
     print("=" * 60, flush=True)
-    
+
     processed_games = set()
-    
+    stats = {"total": 0, "correct": 0}
+
     while True:
         try:
-            active_games = get_active_games()
-            
-            if not active_games:
+            games = get_active_games()
+            if not games:
                 time.sleep(5)
                 continue
-            
-            for game in active_games:
+
+            for game in games:
                 game_id = str(game.get("id"))
-                
                 if game_id in processed_games:
                     continue
-                
+
                 data, latency, start_time, end_time = get_game_data(game_id)
                 if not data:
                     continue
-                
+
                 player_cards, dealer_cards, state = parse_cards_and_state(data)
-                
                 if not player_cards:
                     continue
-                
-                # =============================================
-                # 1. ПРОГНОЗ ПО ЗАДЕРЖКЕ (СКРЫТЫЙ)
-                # =============================================
+
                 predicted_suit = predict_suit_by_latency(latency)
-                
                 if predicted_suit is None:
-                    print(f"⏭️ Игра {game_id}: задержка {latency:.2f} мс — нет прогноза", flush=True)
+                    print(f"⏭️ {game_id}: задержка {latency:.2f} мс — нет прогноза", flush=True)
                     continue
-                
-                print(f"🧪 ТЕСТ: Игра {game_id}", flush=True)
-                print(f"   📊 Задержка: {latency:.2f} мс (в сообщении НЕ будет)", flush=True)
-                print(f"   🃏 Прогноз масти: {predicted_suit}", flush=True)
-                
-                # =============================================
-                # 2. ЖДЁМ ЗАВЕРШЕНИЯ ИГРЫ
-                # =============================================
+
+                # Ждём завершения игры
                 if state not in ["4", "5"]:
-                    print(f"   ⏳ Игра ещё не завершена (state={state}), ждём...", flush=True)
+                    print(f"⏳ {game_id}: игра не завершена (state={state})", flush=True)
                     continue
-                
-                # =============================================
-                # 3. ПРОВЕРЯЕМ РЕЗУЛЬТАТ (масть у дилера)
-                # =============================================
+
                 dealer_suits = get_suits_from_cards(dealer_cards)
-                
-                if predicted_suit in dealer_suits:
-                    result = "✅ СОВПАЛО!"
-                    test_results["correct"] += 1
-                else:
-                    result = "❌ НЕ СОВПАЛО!"
-                
-                test_results["total"] += 1
-                
-                print(f"   🎯 Реальная масть дилера: {', '.join(dealer_suits) if dealer_suits else 'нет карт'}", flush=True)
-                print(f"   📊 Результат: {result}", flush=True)
-                print(f"   📈 Статистика: {test_results['correct']} из {test_results['total']} ({test_results['correct']/test_results['total']*100:.1f}%)", flush=True)
-                print("=" * 60, flush=True)
-                
-                # Сохраняем игру в обработанные
+                is_correct = predicted_suit in dealer_suits
+
+                stats["total"] += 1
+                if is_correct:
+                    stats["correct"] += 1
+
+                game_num = get_game_number()
+                accuracy = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+
+                # =============================================
+                # ФОРМИРУЕМ И ОТПРАВЛЯЕМ ПРОГНОЗ В КАНАЛ
+                # =============================================
+                result_text = "✅ СОВПАЛО" if is_correct else "❌ НЕ СОВПАЛО"
+                msg = f"🔮 <b>ТЕСТ: ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
+                msg += f"🎯 Игра: #N{game_num}\n"
+                msg += f"🃏 Масть дилера: {predicted_suit}\n"
+                msg += f"📊 Результат: {result_text}\n"
+                msg += f"📈 Точность: {stats['correct']} из {stats['total']} ({accuracy:.1f}%)"
+
+                send_message(msg)
+                print(f"📤 Отправлен прогноз для #N{game_num}: {predicted_suit} → {result_text}", flush=True)
+
                 processed_games.add(game_id)
-                
                 time.sleep(0.3)
-            
-            # Очистка кэша
+
             if len(processed_games) > 200:
                 processed_games.clear()
-                print("🗑️ Кэш очищен", flush=True)
-            
+
             time.sleep(5)
-            
+
         except KeyboardInterrupt:
-            print("\n🛑 Тест остановлен", flush=True)
-            print(f"📊 Итог: {test_results['correct']} из {test_results['total']} ({test_results['correct']/test_results['total']*100:.1f}%)", flush=True)
+            print("\n🛑 Остановка", flush=True)
             break
         except Exception as e:
             print(f"❌ Ошибка: {e}", flush=True)
