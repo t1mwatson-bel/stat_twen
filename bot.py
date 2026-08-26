@@ -70,7 +70,7 @@ def send_startup_message():
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
     msg += f"🤖 Статус: Активен\n"
     msg += f"📌 Режим: Прогноз по задержке → игрок\n"
-    msg += f"🔄 Версия: 4.0 (как в прогнозисте по масти)"
+    msg += f"🔄 Версия: 4.1 (исправлена проверка результата)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -197,7 +197,6 @@ def main():
 
     send_startup_message()
 
-    # Храним прогнозы: {target_game: {"suit": suit, "from_game": game_num, "message_id": msg_id, "checked": False}}
     predictions = {}
     processed_games = set()
 
@@ -227,62 +226,69 @@ def main():
                 # ЕСЛИ ИГРА ЗАВЕРШЕНА (state=4/5) — ПРОВЕРЯЕМ ПРОГНОЗ
                 # =====================================================
                 if state in ["4", "5"]:
-                    # Проверяем, есть ли прогноз на эту игру
-                    if current_game_num in predictions:
-                        pred = predictions[current_game_num]
-                        player_suits = get_suits_from_player_cards(player_cards)
-
-                        # Проверяем, есть ли масть у игрока
-                        if pred["suit"] in player_suits:
-                            # ✅ ЗАШЛО!
-                            result_text = f"✅ ЗАШЛО"
-                            pred["checked"] = True
-                            pred["result"] = "win"
-                            print(f"🎯 Прогноз #N{current_game_num} ЗАШЕЛ!", flush=True)
-                            
-                            final_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
-                            final_text += f"📊 От игры: #N{pred['from_game']}\n"
-                            final_text += f"🃏 Масть игрока: {pred['suit']}\n"
-                            final_text += f"🎯 Игра: #N{current_game_num}\n"
-                            final_text += f"📊 Результат: {result_text}"
-                            edit_message(pred["message_id"], final_text)
-                            print(f"📤 Результат для #N{current_game_num}: {result_text}", flush=True)
-                            
-                            processed_games.add(game_id)
-                        else:
-                            # ❌ НЕ ЗАШЛО — проверяем следующий догон
-                            # Считаем, какой это догон
-                            dogon_number = current_game_num - pred["target"]
-                            
-                            if dogon_number >= 3:
-                                # Догон 3 и не зашло → проигрыш
-                                result_text = "❌ НЕ ЗАШЛО (3 догона)"
-                                pred["checked"] = True
-                                pred["result"] = "lose"
-                                print(f"❌ Прогноз #N{current_game_num} НЕ ЗАШЕЛ (3 догона)", flush=True)
+                    # Проверяем все прогнозы, которые ещё не завершены
+                    for target_game, pred in list(predictions.items()):
+                        if pred.get("checked"):
+                            continue
+                        
+                        # Проверяем, подходит ли эта игра под целевой номер
+                        # Прогноз может зайти на target_game, target_game+1, target_game+2, target_game+3
+                        for i in range(4):
+                            check_game = target_game + i
+                            if current_game_num == check_game:
+                                player_suits = get_suits_from_player_cards(player_cards)
+                                dogon_number = i
                                 
-                                final_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
-                                final_text += f"📊 От игры: #N{pred['from_game']}\n"
-                                final_text += f"🃏 Масть игрока: {pred['suit']}\n"
-                                final_text += f"🎯 Игра: #N{current_game_num}\n"
-                                final_text += f"📈 Догон: {dogon_number}\n"
-                                final_text += f"📊 Результат: {result_text}"
-                                edit_message(pred["message_id"], final_text)
-                                print(f"📤 Результат для #N{current_game_num}: {result_text}", flush=True)
-                                
-                                processed_games.add(game_id)
-                            else:
-                                # Обновляем сообщение с текущим догоном
-                                dogon_text = f"🎯 Игра: #N{current_game_num}\n📈 Догон: {dogon_number} (ждём следующую игру)"
-                                update_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
-                                update_text += f"📊 От игры: #N{pred['from_game']}\n"
-                                update_text += f"🃏 Масть игрока: {pred['suit']}\n"
-                                update_text += dogon_text
-                                edit_message(pred["message_id"], update_text)
-                                print(f"⏳ Прогноз #N{current_game_num} не зашёл (догон {dogon_number})", flush=True)
-                    else:
-                        processed_games.add(game_id)
+                                if pred["suit"] in player_suits:
+                                    # ✅ ЗАШЛО!
+                                    pred["checked"] = True
+                                    pred["result"] = "win"
+                                    print(f"🎯 Прогноз #N{target_game} ЗАШЕЛ на игре #N{current_game_num} (догон {dogon_number})!", flush=True)
+                                    
+                                    final_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
+                                    final_text += f"📊 От игры: #N{pred['from_game']}\n"
+                                    final_text += f"🃏 Масть игрока: {pred['suit']}\n"
+                                    final_text += f"🎯 Целевая игра: #N{target_game}\n"
+                                    if dogon_number == 0:
+                                        final_text += f"✅ <b>ЗАШЛО</b> в целевой игре: #N{current_game_num}\n"
+                                    else:
+                                        final_text += f"✅ <b>ЗАШЛО</b> на догоне {dogon_number}: #N{current_game_num}\n"
+                                    edit_message(pred["message_id"], final_text)
+                                    print(f"📤 Результат для #N{target_game}: ЗАШЕЛ", flush=True)
+                                    break
+                                else:
+                                    # Масть не найдена
+                                    if dogon_number >= 3:
+                                        # ❌ НЕ ЗАШЛО (все 4 догона)
+                                        pred["checked"] = True
+                                        pred["result"] = "lose"
+                                        print(f"❌ Прогноз #N{target_game} НЕ ЗАШЕЛ (3 догона)", flush=True)
+                                        
+                                        final_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
+                                        final_text += f"📊 От игры: #N{pred['from_game']}\n"
+                                        final_text += f"🃏 Масть игрока: {pred['suit']}\n"
+                                        final_text += f"🎯 Целевая игра: #N{target_game}\n"
+                                        final_text += f"❌ <b>НЕ ЗАШЛО</b> (проверено 4 игры)\n"
+                                        edit_message(pred["message_id"], final_text)
+                                        print(f"📤 Результат для #N{target_game}: НЕ ЗАШЕЛ", flush=True)
+                                        break
+                                    else:
+                                        # Обновляем статус догона
+                                        update_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
+                                        update_text += f"📊 От игры: #N{pred['from_game']}\n"
+                                        update_text += f"🃏 Масть игрока: {pred['suit']}\n"
+                                        update_text += f"🎯 Целевая игра: #N{target_game}\n"
+                                        update_text += f"⏳ Догон {dogon_number+1}: #N{current_game_num} не зашёл, ждём следующую игру\n"
+                                        edit_message(pred["message_id"], update_text)
+                                        print(f"⏳ Прогноз #N{target_game} догон {dogon_number} не зашёл", flush=True)
+                                        break
+                        
+                        # Если прогноз завершён, можно его удалить из активных
+                        if pred.get("checked"):
+                            # Не удаляем сразу, чтобы сохранить историю
+                            pass
                     
+                    processed_games.add(game_id)
                     continue
 
                 # =====================================================
@@ -292,6 +298,12 @@ def main():
 
                 # Проверяем, нет ли уже прогноза на эту целевую игру
                 if target_game in predictions:
+                    continue
+
+                # Проверяем, есть ли активные прогнозы (не даём новый, пока старый не завершится)
+                active_predictions = [p for p in predictions.values() if not p.get("checked")]
+                if active_predictions:
+                    print(f"⏳ Есть активный прогноз, новый не даём", flush=True)
                     continue
 
                 predicted_suit = predict_suit_by_latency(latency)
