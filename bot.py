@@ -11,7 +11,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🔮 ПРОГНОЗ ПО ЗАДЕРЖКЕ (С ОТПРАВКОЙ)", flush=True)
+print("🔮 ПРОГНОЗ ПО ЗАДЕРЖКЕ (С ОТПРАВКОЙ В КАНАЛ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -51,7 +51,7 @@ SUITS_NAMES = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
 RANKS = {1: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
 
 # =====================================================================
-# НОМЕР ИГРЫ (от 03:00)
+# НОМЕР ИГРЫ
 # =====================================================================
 def get_game_number():
     now = datetime.now(MOSCOW_TZ)
@@ -63,15 +63,22 @@ def get_game_number():
     return game_number
 
 # =====================================================================
-# ФУНКЦИИ ОТПРАВКИ
+# ОТПРАВКА В TELEGRAM
 # =====================================================================
 def send_message(text):
+    """Отправляет сообщение в канал"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
-            return response.json()["result"]["message_id"]
+            result = response.json()
+            if result.get("ok"):
+                print(f"✅ Сообщение отправлено в канал", flush=True)
+                return result["result"]["message_id"]
+            else:
+                print(f"❌ Ошибка отправки: {result}", flush=True)
+                return None
         else:
             print(f"❌ Ошибка отправки: {response.status_code} - {response.text}", flush=True)
             return None
@@ -192,46 +199,53 @@ def main():
                 if not player_cards:
                     continue
 
+                # 1. Делаем прогноз по задержке
                 predicted_suit = predict_suit_by_latency(latency)
                 if predicted_suit is None:
                     print(f"⏭️ {game_id}: задержка {latency:.2f} мс — нет прогноза", flush=True)
                     continue
 
-                # Ждём завершения игры
-                if state not in ["4", "5"]:
-                    print(f"⏳ {game_id}: игра не завершена (state={state})", flush=True)
-                    continue
-
-                dealer_suits = get_suits_from_cards(dealer_cards)
-                is_correct = predicted_suit in dealer_suits
-
-                stats["total"] += 1
-                if is_correct:
-                    stats["correct"] += 1
-
                 game_num = get_game_number()
-                accuracy = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
 
-                # =============================================
-                # ФОРМИРУЕМ И ОТПРАВЛЯЕМ ПРОГНОЗ В КАНАЛ
-                # =============================================
-                result_text = "✅ СОВПАЛО" if is_correct else "❌ НЕ СОВПАЛО"
-                msg = f"🔮 <b>ТЕСТ: ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
+                # 2. Отправляем прогноз в канал (СРАЗУ!)
+                msg = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
                 msg += f"🎯 Игра: #N{game_num}\n"
                 msg += f"🃏 Масть дилера: {predicted_suit}\n"
-                msg += f"📊 Результат: {result_text}\n"
-                msg += f"📈 Точность: {stats['correct']} из {stats['total']} ({accuracy:.1f}%)"
+                msg += f"⏱️ Задержка: {latency:.2f} мс"
 
+                print(f"📤 Отправляю прогноз для #N{game_num}: {predicted_suit}", flush=True)
                 send_message(msg)
-                print(f"📤 Отправлен прогноз для #N{game_num}: {predicted_suit} → {result_text}", flush=True)
 
-                processed_games.add(game_id)
+                # 3. Проверяем результат (если игра завершена)
+                if state in ["4", "5"]:
+                    dealer_suits = get_suits_from_cards(dealer_cards)
+                    is_correct = predicted_suit in dealer_suits
+
+                    stats["total"] += 1
+                    if is_correct:
+                        stats["correct"] += 1
+
+                    accuracy = (stats["correct"] / stats["total"] * 100) if stats["total"] > 0 else 0
+                    result_text = "✅ СОВПАЛО" if is_correct else "❌ НЕ СОВПАЛО"
+
+                    # Отправляем результат
+                    result_msg = f"📊 <b>РЕЗУЛЬТАТ</b>\n"
+                    result_msg += f"🎯 Игра: #N{game_num}\n"
+                    result_msg += f"🃏 Масть дилера: {', '.join(dealer_suits) if dealer_suits else 'нет карт'}\n"
+                    result_msg += f"📊 Результат: {result_text}\n"
+                    result_msg += f"📈 Точность: {stats['correct']} из {stats['total']} ({accuracy:.1f}%)"
+
+                    send_message(result_msg)
+                    print(f"📤 Отправлен результат для #N{game_num}: {result_text}", flush=True)
+
+                    processed_games.add(game_id)
+
                 time.sleep(0.3)
 
             if len(processed_games) > 200:
                 processed_games.clear()
 
-            time.sleep(5)
+            time.sleep(3)
 
         except KeyboardInterrupt:
             print("\n🛑 Остановка", flush=True)
