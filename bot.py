@@ -22,8 +22,11 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
     BOT_TOKEN = os.getenv('BOT_TOKEN_PROGNOZ')
 
-CHANNEL_STATS = os.getenv('CHANNEL_STATS_ID')
-CHANNEL_PROGNOZ = os.getenv('CHANNEL_PROGNOZ_ID')
+# ================================================================
+# ПРАВИЛЬНЫЕ ИМЕНА ПЕРЕМЕННЫХ - БЕЗ _ID (КАК У ТЕБЯ НА ХОСТИНГЕ)
+# ================================================================
+CHANNEL_STATS = os.getenv('CHANNEL_STATS')
+CHANNEL_PROGNOZ = os.getenv('CHANNEL_PROGNOZ')
 
 print("🔍 ДИАГНОСТИКА ПЕРЕМЕННЫХ:", flush=True)
 print(f"BOT_TOKEN: {BOT_TOKEN[:5] if BOT_TOKEN else 'НЕ ЗАДАН'}", flush=True)
@@ -526,6 +529,7 @@ def main():
                 target_game = current_game_num + 1
                 
                 # Получаем задержку для текущей игры
+                latency = None
                 for game in games:
                     game_id = str(game.get("id"))
                     data, latency = get_game_data(game_id)
