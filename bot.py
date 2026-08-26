@@ -11,7 +11,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ПРОГНОЗИСТ ПО ЗАДЕРЖКЕ (ДОГОНЫ + ПРИВЕТСТВИЕ)", flush=True)
+print("🃏 ПРОГНОЗИСТ ПО ЗАДЕРЖКЕ (ДОГОНЫ КАК В ПРОГНОЗИСТАХ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -62,7 +62,7 @@ def get_game_number():
     return game_number
 
 # =====================================================================
-# ПРИВЕТСТВИЕ ПРИ ЗАПУСКЕ
+# ПРИВЕТСТВИЕ
 # =====================================================================
 def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
@@ -70,7 +70,7 @@ def send_startup_message():
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
     msg += f"🤖 Статус: Активен\n"
     msg += f"📌 Режим: Прогноз по задержке → игрок + догоны\n"
-    msg += f"🔄 Версия: 3.1 (догоны исправлены)"
+    msg += f"🔄 Версия: 3.4 (догоны как в прогнозистах)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -189,13 +189,12 @@ def predict_suit_by_latency(latency):
         return None
 
 # =====================================================================
-# ОСНОВНОЙ ЦИКЛ
+# ОСНОВНОЙ ЦИКЛ (ДОГОНЫ КАК В ПРОГНОЗИСТАХ)
 # =====================================================================
 def main():
     print("🔄 БОТ ЗАПУЩЕН", flush=True)
     print("=" * 60, flush=True)
 
-    # Отправляем приветствие
     send_startup_message()
 
     # Храним прогнозы: {target_game: {"suit": suit, "from_game": game_num, "message_id": msg_id, "dogon": 0, "checked": False}}
@@ -225,7 +224,7 @@ def main():
                 current_game_num = get_game_number()
 
                 # =====================================================
-                # 1. ПРОВЕРЯЕМ ЗАВЕРШЕНИЕ ИГРЫ
+                # 1. ПРОВЕРЯЕМ ЗАВЕРШЕНИЕ ИГРЫ (state=4/5)
                 # =====================================================
                 is_finished = state in ["4", "5"]
 
@@ -240,23 +239,26 @@ def main():
                             result_text = f"✅ ЗАШЛО на догоне {pred['dogon']}" if pred["dogon"] > 0 else "✅ ЗАШЛО в целевой игре"
                             pred["checked"] = True
                             pred["result"] = "win"
+                            print(f"🎯 Прогноз #N{current_game_num} зашёл на догоне {pred['dogon']}!", flush=True)
                         else:
-                            # ❌ Не зашло – увеличиваем догон
+                            # ❌ Не зашло – переходим к следующему догону
                             pred["dogon"] += 1
+                            print(f"⏳ Прогноз #N{current_game_num} не зашёл (догон {pred['dogon']})", flush=True)
+                            
+                            # Если догон > 3 – закрываем как проигрыш
                             if pred["dogon"] > 3:
                                 result_text = "❌ НЕ ЗАШЛО (3 догона)"
                                 pred["checked"] = True
                                 pred["result"] = "lose"
+                                print(f"❌ Прогноз #N{current_game_num} проигран (3 догона)", flush=True)
                             else:
-                                # Обновляем сообщение с текущим догоном
+                                # Обновляем сообщение (ждём следующую игру)
                                 original_text = f"🔮 <b>ПРОГНОЗ ПО ЗАДЕРЖКЕ</b>\n"
                                 original_text += f"📊 От игры: #N{pred['from_game']}\n"
                                 original_text += f"🃏 Масть игрока: {pred['suit']}\n"
-                                original_text += f"🎯 Целевая игра: #N{current_game_num}\n"
+                                original_text += f"🎯 Игра: #N{current_game_num}\n"
                                 original_text += f"📈 Догон: {pred['dogon']} (ждём следующую игру)"
                                 edit_message(pred["message_id"], original_text)
-                                
-                                # ✅ НЕ добавляем игру в processed_games, чтобы проверить догоны
                                 continue
 
                         # Если прогноз завершён – обновляем сообщение с результатом
@@ -270,10 +272,7 @@ def main():
                             edit_message(pred["message_id"], final_text)
                             print(f"📤 Результат для #N{current_game_num}: {result_text}", flush=True)
 
-                            # ✅ Добавляем в processed_games ТОЛЬКО после завершения прогноза
                             processed_games.add(game_id)
-
-                    # Если прогноза на эту игру нет – просто добавляем в processed_games
                     else:
                         processed_games.add(game_id)
                     
