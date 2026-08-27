@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ТЕСТ: ПРОГНОЗ ПО ПОСЛЕДОВАТЕЛЬНОСТИ (СМЕЩЕНИЕ +10)", flush=True)
+print("🃏 ТЕСТ: ПРОГНОЗ ПО ПОСЛЕДОВАТЕЛЬНОСТИ (СМЕЩЕНИЕ +10, БЕЗ БЛОКИРОВКИ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -42,12 +42,12 @@ print("✅ Все переменные заданы!", flush=True)
 # =====================================================================
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 BASE_URL = "https://1xlite-36553.pro"
-OFFSET_FILE = "offset_seq.txt"
-HISTORY_FILE = "history_seq.json"
-MAX_HISTORY = 200
+OFFSET_FILE = "offset_seq_no_block.txt"
+HISTORY_FILE = "history_seq_no_block.json"
+MAX_HISTORY = 500
 PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
-PREDICT_INTERVAL = 3
+PREDICT_INTERVAL = 2
 TIMEOUT_SECONDS = 600
 OFFSET = 10  # Смещение прогноза на +10 игр
 
@@ -142,10 +142,10 @@ def edit_message(message_id, text):
 
 def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
-    msg = f"🚀 <b>ТЕСТ: ПРОГНОЗ ПО ПОСЛЕДОВАТЕЛЬНОСТИ (+10)</b>\n"
+    msg = f"🚀 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10, БЕЗ БЛОКИРОВКИ)</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
-    msg += f"📌 Режим: Задержка + последовательность, смещение +10 игр\n"
-    msg += f"🔄 Версия: 10.1 (смещение)"
+    msg += f"📌 Режим: Прогноз на каждую игру, смещение +10\n"
+    msg += f"🔄 Версия: 10.2 (без блокировки)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -311,29 +311,7 @@ def predict_suit_by_latency(latency):
     else:
         return None
 
-def predict_rank_by_latency(latency):
-    if 93 <= latency < 95:
-        return "8"
-    elif 95 <= latency < 97:
-        return "7"
-    elif 97 <= latency < 99:
-        return "9"
-    elif 99 <= latency < 101:
-        return "J"
-    elif 101 <= latency < 103:
-        return "10"
-    elif 103 <= latency < 105:
-        return "9"
-    elif latency >= 105:
-        return "K"
-    else:
-        return None
-
 def refine_by_sequence(p1, p2, p3, base_suit, latency):
-    """
-    Уточняет прогноз по последовательности
-    """
-    # Для диапазона 93-95
     if 93 <= latency < 95:
         if p1 and p1.get("rank") == "7" and p1.get("suit") == "♣️":
             return "♥️"
@@ -346,7 +324,6 @@ def refine_by_sequence(p1, p2, p3, base_suit, latency):
         elif p1 and p1.get("rank") in ["J", "Q", "K"] and p1.get("suit") == "♠️":
             return "♣️"
     
-    # Для диапазона 95-97
     if 95 <= latency < 97:
         if p1 and p1.get("rank") == "7" and p1.get("suit") == "♠️":
             return "♣️"
@@ -355,7 +332,6 @@ def refine_by_sequence(p1, p2, p3, base_suit, latency):
         elif p1 and p1.get("rank") == "9" and p1.get("suit") == "♦️":
             return "♠️"
     
-    # Для диапазона 97-99
     if 97 <= latency < 99:
         if p1 and p1.get("rank") == "9" and p1.get("suit") == "♦️":
             return "♠️"
@@ -364,7 +340,6 @@ def refine_by_sequence(p1, p2, p3, base_suit, latency):
         elif p1 and p1.get("rank") == "7" and p1.get("suit") == "♥️":
             return "♣️"
     
-    # Если P1 и P2 одной масти
     if p1 and p2 and p1.get("suit") == p2.get("suit"):
         if p1.get("suit") == "♣️":
             return "♥️"
@@ -430,7 +405,7 @@ def clean_memory(history):
     return history
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (ТОЛЬКО ИГРОК)
+# ПРОВЕРКА РЕЗУЛЬТАТА (С ДОГОНАМИ)
 # =====================================================================
 def check_results(history, all_messages):
     global stats
@@ -487,7 +462,6 @@ def check_results(history, all_messages):
             if not game_data:
                 continue
             
-            # Проверяем масть у игрока
             suit_found = False
             player_cards = game_data.get("player_cards", [])
             
@@ -536,12 +510,12 @@ def check_results(history, all_messages):
                 return
 
 # =====================================================================
-# ОСНОВНОЙ ЦИКЛ (СМЕЩЕНИЕ +10)
+# ОСНОВНОЙ ЦИКЛ (БЕЗ БЛОКИРОВКИ PENDING)
 # =====================================================================
 def main():
     global LAST_PREDICT_TIME, stats
     
-    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10)...", flush=True)
+    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10, БЕЗ БЛОКИРОВКИ)...", flush=True)
     print("=" * 60, flush=True)
     
     send_startup_message()
@@ -620,11 +594,9 @@ def main():
                 
                 print(f"⏭️ #N{game_number} не завершена", flush=True)
                 
-                pending_exists = any(h.get('status') == 'pending' for h in history)
-                if pending_exists:
-                    print(f"⏳ Есть ожидающий прогноз", flush=True)
-                    continue
-                
+                # =====================================================
+                # БЛОКИРОВКА УБРАНА!
+                # =====================================================
                 if game_number in PROCESSED_GAMES:
                     print(f"⏭️ #N{game_number} уже обработана", flush=True)
                     continue
@@ -634,7 +606,7 @@ def main():
                     continue
                 
                 current_game_num = get_game_number()
-                target_game = current_game_num + OFFSET  # СМЕЩЕНИЕ +10
+                target_game = current_game_num + OFFSET
                 
                 latency = None
                 for game in games:
@@ -646,20 +618,18 @@ def main():
                 if latency is None:
                     continue
                 
-                # === ПОЛУЧАЕМ ПОСЛЕДОВАТЕЛЬНОСТЬ ИЗ ТЕКУЩЕЙ ИГРЫ ===
+                # === ПОЛУЧАЕМ ПОСЛЕДОВАТЕЛЬНОСТЬ ===
                 current_game_data = None
                 for msg in all_messages:
                     if f"#N{current_game_num}" in msg:
                         current_game_data = parse_game_from_text(msg)
                         break
                 
-                # Базовый прогноз по задержке
                 base_suit = predict_suit_by_latency(latency)
                 if base_suit is None:
                     print(f"⏭️ Задержка {latency:.2f} мс — нет прогноза", flush=True)
                     continue
                 
-                # Уточняем по последовательности
                 predicted_suit = base_suit
                 if current_game_data:
                     p1 = current_game_data.get("player_cards", [])[0] if current_game_data.get("player_cards") else None
@@ -668,10 +638,8 @@ def main():
                     
                     refined = refine_by_sequence(p1, p2, p3, base_suit, latency)
                     if refined != base_suit:
-                        print(f"🔍 Уточнение: {base_suit} → {refined} (по последовательности)", flush=True)
+                        print(f"🔍 Уточнение: {base_suit} → {refined}", flush=True)
                         predicted_suit = refined
-                else:
-                    print(f"⚠️ Не найдена текущая игра #N{current_game_num} для последовательности", flush=True)
                 
                 if current_time - LAST_PREDICT_TIME < PREDICT_INTERVAL:
                     print(f"⏳ Интервал {int(current_time - LAST_PREDICT_TIME)} сек", flush=True)
