@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ПРОГНОЗИСТ (ПО ЗАДЕРЖКЕ + ЛОББИ)", flush=True)
+print("🃏 ПРОГНОЗИСТ (ПО ЗАДЕРЖКЕ + ЛОББИ + НУМЕРАЦИЯ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -59,6 +59,18 @@ HEADERS = {
 
 SUITS_NAMES = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
 RANKS = {1: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
+
+# =====================================================================
+# НОМЕР ИГРЫ (ПО ВРЕМЕНИ)
+# =====================================================================
+def get_game_number():
+    now = datetime.now(MOSCOW_TZ)
+    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now < start:
+        start = start - timedelta(days=1)
+    diff_minutes = (now - start).total_seconds() / 60
+    game_number = int(diff_minutes) // 2 % 720 + 1
+    return game_number
 
 # =====================================================================
 # СТАТИСТИКА
@@ -145,7 +157,7 @@ def send_startup_message():
     msg = f"🚀 <b>ПРОГНОЗИСТ ЗАПУЩЕН</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
     msg += f"📌 Режим: Прогноз по задержке на игры в лобби\n"
-    msg += f"🔄 Версия: 17.0 (лобби)"
+    msg += f"🔄 Версия: 17.1 (нумерация по времени)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -546,7 +558,7 @@ def check_results(history, all_messages):
 def main():
     global LAST_PREDICT_TIME, stats
     
-    print("🔄 ЗАПУСК ПРОГНОЗИСТА (ЛОББИ)...", flush=True)
+    print("🔄 ЗАПУСК ПРОГНОЗИСТА (ЛОББИ + НУМЕРАЦИЯ)...", flush=True)
     print("=" * 60, flush=True)
     
     send_startup_message()
@@ -563,8 +575,8 @@ def main():
     last_cleanup_time = time.time()
     last_stats_time = time.time()
     
-    # Кэш для игр, на которые уже делали прогноз
-    predicted_games = set()  # храним game_id или номера игр
+    # Кэш для игр, на которые уже делали прогноз (по номерам)
+    predicted_games = set()
     
     print("🚀 БОТ ГОТОВ К РАБОТЕ!", flush=True)
     print("=" * 60, flush=True)
@@ -588,16 +600,6 @@ def main():
             if games:
                 for game in games:
                     game_id = str(game.get("id"))
-                    game_num = game.get("num")  # номер игры из API
-                    
-                    # Если номер не получен, пытаемся по ID (но лучше по num)
-                    if game_num is None:
-                        # Пропускаем, так как не знаем номер
-                        continue
-                    
-                    # Проверяем, не делали ли уже прогноз на эту игру
-                    if game_num in predicted_games:
-                        continue
                     
                     # Получаем данные игры (задержка и состояние)
                     data, latency = get_game_data(game_id)
@@ -614,6 +616,13 @@ def main():
                         continue
                     
                     # Теперь это игра в лобби (state=0 и карт нет)
+                    # Определяем номер игры по времени (как в канале)
+                    game_num = get_game_number()
+                    
+                    # Проверяем, не делали ли уже прогноз на этот номер
+                    if game_num in predicted_games:
+                        continue
+                    
                     predicted_suit = predict_suit_by_latency(latency)
                     if predicted_suit is None:
                         print(f"⏭️ Игра #{game_num}: задержка {latency:.2f} мс — нет прогноза", flush=True)
