@@ -47,8 +47,9 @@ HISTORY_FILE = "history_all_lobby.json"
 MAX_HISTORY = 500
 PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
-PREDICT_INTERVAL = 2  # 2 секунды между прогнозами
+PREDICT_INTERVAL = 2
 TIMEOUT_SECONDS = 600
+GAME_ID_CACHE = {}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -144,7 +145,7 @@ def send_startup_message():
     msg = f"🚀 <b>ТЕСТ: ВСЕ ИГРЫ В ЛОББИ</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
     msg += f"📌 Режим: Прогноз на все игры в лобби\n"
-    msg += f"🔄 Версия: 13.0 (все игры)"
+    msg += f"🔄 Версия: 14.0 (с кэшем)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -254,9 +255,11 @@ def get_active_games():
             active_games = []
             for game in games:
                 if game.get("liga", {}).get("id") == 2092323:
-                    game_id = game.get("id")
-                    if game_id:
-                        active_games.append(game)
+                    game_id = str(game.get("id"))
+                    num = game.get("num")
+                    if num:
+                        GAME_ID_CACHE[game_id] = int(num)
+                    active_games.append(game)
             return active_games
         else:
             return []
@@ -279,21 +282,15 @@ def get_game_data(game_id):
         print(f"❌ Ошибка игры {game_id}: {e}", flush=True)
         return None, None
 
-def get_game_number_from_api(data):
-    """Пытается вытащить номер игры из данных API"""
+def get_game_number_from_data(data):
+    """Получает номер игры из данных API"""
     try:
-        # Пробуем разные пути
-        if data.get("Value"):
-            sc = data.get("Value", {}).get("SC", {})
-            # Иногда номер игры есть в SC
-            pass
-        # Или в num
         num = data.get("num")
         if num:
-            return num
+            return int(num)
+        return None
     except:
-        pass
-    return None
+        return None
 
 # =====================================================================
 # ПРОГНОЗ ПО ЗАДЕРЖКЕ
@@ -471,31 +468,10 @@ def check_results(history, all_messages):
             return
 
 # =====================================================================
-# ПОЛУЧЕНИЕ НОМЕРА ИГРЫ ИЗ API
-# =====================================================================
-def get_game_number_from_lobby(game_data):
-    """Пытается получить номер игры из данных API"""
-    try:
-        # Пробуем получить num
-        num = game_data.get("num")
-        if num:
-            return int(num)
-        
-        # Пробуем другие пути
-        if game_data.get("Value"):
-            value = game_data.get("Value", {})
-            num = value.get("num")
-            if num:
-                return int(num)
-    except:
-        pass
-    return None
-
-# =====================================================================
-# ОСНОВНОЙ ЦИКЛ (ВСЕ ИГРЫ В ЛОББИ)
+# ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def main():
-    global LAST_PREDICT_TIME, stats
+    global LAST_PREDICT_TIME, stats, GAME_ID_CACHE
     
     print("🔄 ЗАПУСК ТЕСТА (ВСЕ ИГРЫ В ЛОББИ)...", flush=True)
     print("=" * 60, flush=True)
@@ -567,7 +543,7 @@ def main():
                     all_messages = all_messages[-500:]
                 
                 print(f"📥 Получена игра #N{game_number}", flush=True)
-                print(f"📝 Текст: {text}", flush=True)
+                print(f"📝 Текст: {text[:100]}...", flush=True)
                 
                 if '✅' in text or '🔰' in text:
                     print(f"✅ #N{game_number} завершена - проверяем", flush=True)
@@ -576,40 +552,44 @@ def main():
                 
                 print(f"⏭️ #N{game_number} не завершена", flush=True)
                 
-                # Если игра уже обработана — пропускаем
                 if game_number in PROCESSED_GAMES:
                     print(f"⏭️ #N{game_number} уже обработана", flush=True)
                     continue
                 
-                # Получаем все активные игры из лобби
+                # Получаем все активные игры из API
                 games = get_active_games()
                 if not games:
+                    print("💤 Нет активных игр в лобби", flush=True)
                     continue
                 
-                # Для каждой игры в лобби проверяем, не обработана ли она
+                # Обновляем кэш из полученных игр
+                for game in games:
+                    game_id = str(game.get("id"))
+                    num = game.get("num")
+                    if num:
+                        GAME_ID_CACHE[game_id] = int(num)
+                
+                # Обрабатываем каждую игру
                 for game in games:
                     game_id = str(game.get("id"))
                     
-                    # Получаем данные игры и задержку
+                    # Получаем номер игры из кэша
+                    lobby_game_number = GAME_ID_CACHE.get(game_id)
+                    if lobby_game_number is None:
+                        print(f"⚠️ Не найден номер для game_id: {game_id}", flush=True)
+                        continue
+                    
+                    if lobby_game_number in PROCESSED_GAMES:
+                        continue
+                    
+                    # Получаем задержку
                     data, latency = get_game_data(game_id)
                     if not data or latency is None:
                         continue
                     
-                    # Пытаемся получить номер игры из API
-                    lobby_game_num = get_game_number_from_lobby(data)
-                    
-                    # Если не удалось получить номер — пропускаем
-                    if lobby_game_num is None:
-                        print(f"⚠️ Не удалось получить номер игры для {game_id}", flush=True)
-                        continue
-                    
-                    # Проверяем, не обработана ли эта игра
-                    if lobby_game_num in PROCESSED_GAMES:
-                        continue
-                    
                     predicted_suit = predict_suit_by_latency(latency)
                     if predicted_suit is None:
-                        print(f"⏭️ Задержка {latency:.2f} мс — нет прогноза для #N{lobby_game_num}", flush=True)
+                        print(f"⏭️ Задержка {latency:.2f} мс — нет прогноза для #N{lobby_game_number}", flush=True)
                         continue
                     
                     if current_time - LAST_PREDICT_TIME < PREDICT_INTERVAL:
@@ -617,20 +597,20 @@ def main():
                         continue
                     
                     msg = f"🔮 <b>ТЕСТ: ВСЕ ИГРЫ В ЛОББИ</b>\n"
-                    msg += f"📊 Игра: #N{lobby_game_num}\n"
+                    msg += f"📊 Игра: #N{lobby_game_number}\n"
                     msg += f"🃏 Масть: {predicted_suit}\n"
                     msg += f"⏰ {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n"
                     msg += f"📌 Ставку можно сделать до начала игры!"
                     
                     message_id = send_message(msg)
                     if message_id:
-                        print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #N{lobby_game_num} → масть {predicted_suit}", flush=True)
+                        print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #N{lobby_game_number} → масть {predicted_suit}", flush=True)
                         LAST_PREDICT_TIME = current_time
-                        PROCESSED_GAMES.add(lobby_game_num)
+                        PROCESSED_GAMES.add(lobby_game_number)
                         
                         history.append({
-                            "from_game": lobby_game_num,
-                            "target": lobby_game_num,
+                            "from_game": lobby_game_number,
+                            "target": lobby_game_number,
                             "suit": predicted_suit,
                             "time": datetime.now(MOSCOW_TZ).isoformat(),
                             "status": "pending",
