@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ТЕСТ: ПРОГНОЗ НА ТЕКУЩУЮ ИГРУ", flush=True)
+print("🃏 ТЕСТ: ПРОГНОЗ НА ТЕКУЩУЮ ИГРУ (БЕЗ БЛОКИРОВКИ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -143,8 +143,8 @@ def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
     msg = f"🚀 <b>ТЕСТ: ПРОГНОЗ НА ТЕКУЩУЮ ИГРУ</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
-    msg += f"📌 Режим: Задержка → прогноз на текущую игру\n"
-    msg += f"🔄 Версия: 11.0 (текущая игра)"
+    msg += f"📌 Режим: Прогноз на каждую новую игру\n"
+    msg += f"🔄 Версия: 12.0 (без блокировки)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -362,7 +362,7 @@ def clean_memory(history):
     return history
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (ИГРОК)
+# ПРОВЕРКА РЕЗУЛЬТАТА
 # =====================================================================
 def check_results(history, all_messages):
     global stats
@@ -399,7 +399,6 @@ def check_results(history, all_messages):
             save_history(history)
             continue
         
-        # Проверяем ТОЛЬКО целевую игру (текущую)
         game_to_check = target
         
         game_msg = None
@@ -417,7 +416,6 @@ def check_results(history, all_messages):
             print(f"⚠️ Не удалось распарсить #N{game_to_check}", flush=True)
             continue
         
-        # Проверяем масть у игрока
         suit_found = False
         suits = game_data.get("suits", [])
         
@@ -466,12 +464,12 @@ def check_results(history, all_messages):
             return
 
 # =====================================================================
-# ОСНОВНОЙ ЦИКЛ
+# ОСНОВНОЙ ЦИКЛ (БЕЗ БЛОКИРОВКИ PENDING)
 # =====================================================================
 def main():
     global LAST_PREDICT_TIME, stats
     
-    print("🔄 ЗАПУСК ТЕСТА (ТЕКУЩАЯ ИГРА)...", flush=True)
+    print("🔄 ЗАПУСК ТЕСТА (ТЕКУЩАЯ ИГРА, БЕЗ БЛОКИРОВКИ)...", flush=True)
     print("=" * 60, flush=True)
     
     send_startup_message()
@@ -550,10 +548,9 @@ def main():
                 
                 print(f"⏭️ #N{game_number} не завершена", flush=True)
                 
-                pending_exists = any(h.get('status') == 'pending' for h in history)
-                if pending_exists:
-                    print(f"⏳ Есть ожидающий прогноз", flush=True)
-                    continue
+                # =====================================================
+                # УБИРАЕМ БЛОКИРОВКУ ПО PENDING
+                # =====================================================
                 
                 if game_number in PROCESSED_GAMES:
                     print(f"⏭️ #N{game_number} уже обработана", flush=True)
@@ -565,7 +562,6 @@ def main():
                 
                 current_game_num = get_game_number()
                 
-                # ПРОГНОЗ НА ТЕКУЩУЮ ИГРУ
                 if current_game_num != game_number:
                     print(f"⏭️ Номер игры не совпадает: {current_game_num} vs {game_number}", flush=True)
                     continue
