@@ -49,6 +49,7 @@ PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
 PREDICT_INTERVAL = 10
 TIMEOUT_SECONDS = 600
+GAME_NUMBER_OFFSET = 10  # ← СМЕЩЕНИЕ ПРОГНОЗА НА 10 ИГР ВПЕРЁД
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -589,8 +590,12 @@ def main():
             # === ОПРОС API: ИЩЕМ ИГРЫ С STATE=0 ===
             games = get_active_games()
             if games:
-                # Вычисляем номер игры по времени
-                game_num = get_game_number()
+                # Получаем текущий номер игры по времени
+                raw_game_num = get_game_number()
+                # Прибавляем смещение (10) и циклически корректируем (1-720)
+                game_num = ((raw_game_num + GAME_NUMBER_OFFSET - 1) % 720) + 1
+                
+                print(f"🔎 Текущая игра по времени: #N{raw_game_num}, цель прогноза: #N{game_num}", flush=True)
                 
                 # Ищем в API игру с таким же номером (num)
                 target_game = None
