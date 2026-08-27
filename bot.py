@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ПРОГНОЗИСТ (ФИНАЛ)", flush=True)
+print("🃏 ПРОГНОЗИСТ (ПО ЗАДЕРЖКЕ + ЛОББИ)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -47,9 +47,8 @@ HISTORY_FILE = "history_final.json"
 MAX_HISTORY = 200
 PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
-PREDICT_INTERVAL = 3
+PREDICT_INTERVAL = 10
 TIMEOUT_SECONDS = 600
-GAME_ID_CACHE = {}  # game_id → номер из канала (если удастся сопоставить)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -59,6 +58,7 @@ HEADERS = {
 }
 
 SUITS_NAMES = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
+RANKS = {1: "A", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10", 11: "J", 12: "Q", 13: "K"}
 
 # =====================================================================
 # СТАТИСТИКА
@@ -144,13 +144,13 @@ def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
     msg = f"🚀 <b>ПРОГНОЗИСТ ЗАПУЩЕН</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
-    msg += f"📌 Режим: Прогноз на текущую игру, догоны 4 игры\n"
-    msg += f"🔄 Версия: 16.0 (финал)"
+    msg += f"📌 Режим: Прогноз по задержке на игры в лобби\n"
+    msg += f"🔄 Версия: 17.0 (лобби)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
 # =====================================================================
-# ПАРСИНГ
+# ПАРСИНГ ИЗ КАНАЛА (ДЛЯ ПРОВЕРКИ РЕЗУЛЬТАТОВ)
 # =====================================================================
 def parse_game_from_text(text):
     try:
@@ -257,16 +257,11 @@ def get_active_games():
                 games = data
             else:
                 return []
-            active_games = []
+            active = []
             for game in games:
                 if game.get("liga", {}).get("id") == 2092323:
-                    game_id = str(game.get("id"))
-                    # Пытаемся получить номер игры из num, если есть
-                    num = game.get("num")
-                    if num:
-                        GAME_ID_CACHE[game_id] = int(num)
-                    active_games.append(game)
-            return active_games
+                    active.append(game)
+            return active
         else:
             return []
     except Exception as e:
@@ -287,6 +282,76 @@ def get_game_data(game_id):
     except Exception as e:
         print(f"❌ Ошибка игры {game_id}: {e}", flush=True)
         return None, None
+
+def get_game_state(data):
+    """Извлекает состояние игры и карты"""
+    player_cards = []
+    dealer_cards = []
+    state = "0"
+    
+    # Пробуем через Value.SC
+    value = data.get("Value", {})
+    if value:
+        sc = value.get("SC", {})
+        if sc:
+            for item in sc.get("S", []):
+                if item.get("Key") == "P1":
+                    try:
+                        player_cards = json.loads(item.get("Value", "[]"))
+                    except:
+                        player_cards = []
+                if item.get("Key") == "P2":
+                    try:
+                        dealer_cards = json.loads(item.get("Value", "[]"))
+                    except:
+                        dealer_cards = []
+                if item.get("Key") == "STATE":
+                    state = item.get("Value")
+    
+    # Если не нашлось, пробуем через scores
+    if not player_cards:
+        scores = data.get("scores", {})
+        if scores:
+            statistic = scores.get("statistic", {})
+            main_stat = statistic.get("main", {})
+            if main_stat:
+                p1_str = main_stat.get("P1", "[]")
+                p2_str = main_stat.get("P2", "[]")
+                state = main_stat.get("STATE", "0")
+                try:
+                    player_cards = json.loads(p1_str) if isinstance(p1_str, str) else p1_str
+                except:
+                    player_cards = []
+                try:
+                    dealer_cards = json.loads(p2_str) if isinstance(p2_str, str) else p2_str
+                except:
+                    dealer_cards = []
+    
+    # Преобразуем в читаемый формат
+    def parse_cards(cards):
+        result = []
+        for card in cards:
+            cs = card.get("CS", 0)
+            cv = card.get("CV", 0)
+            suit = SUITS_NAMES.get(cs, "?")
+            rank = RANKS.get(cv, "?")
+            result.append({"rank": rank, "suit": suit})
+        return result
+    
+    player_cards_parsed = parse_cards(player_cards)
+    dealer_cards_parsed = parse_cards(dealer_cards)
+    player_suits = [c["suit"] for c in player_cards_parsed]
+    dealer_suits = [c["suit"] for c in dealer_cards_parsed]
+    
+    return {
+        "state": state,
+        "player_cards": player_cards_parsed,
+        "dealer_cards": dealer_cards_parsed,
+        "player_suits": player_suits,
+        "dealer_suits": dealer_suits,
+        "is_started": len(player_cards_parsed) > 0 or len(dealer_cards_parsed) > 0,
+        "is_finished": state in ["4", "5"]
+    }
 
 # =====================================================================
 # ПРОГНОЗ ПО ЗАДЕРЖКЕ
@@ -362,7 +427,7 @@ def clean_memory(history):
     return history
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (С ДОГОНАМИ)
+# ПРОВЕРКА РЕЗУЛЬТАТА (ПО КАНАЛУ)
 # =====================================================================
 def check_results(history, all_messages):
     global stats
@@ -476,22 +541,12 @@ def check_results(history, all_messages):
                 return
 
 # =====================================================================
-# ПОЛУЧЕНИЕ GAME_ID ПО НОМЕРУ ИЗ КАНАЛА
-# =====================================================================
-def get_game_id_by_number(game_number):
-    """Ищет game_id по номеру игры из кэша"""
-    for gid, num in GAME_ID_CACHE.items():
-        if num == game_number:
-            return gid
-    return None
-
-# =====================================================================
 # ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def main():
-    global LAST_PREDICT_TIME, stats, GAME_ID_CACHE
+    global LAST_PREDICT_TIME, stats
     
-    print("🔄 ЗАПУСК ПРОГНОЗИСТА...", flush=True)
+    print("🔄 ЗАПУСК ПРОГНОЗИСТА (ЛОББИ)...", flush=True)
     print("=" * 60, flush=True)
     
     send_startup_message()
@@ -506,8 +561,10 @@ def main():
     check_results(history, all_messages)
     
     last_cleanup_time = time.time()
-    last_forced_check = time.time()
     last_stats_time = time.time()
+    
+    # Кэш для игр, на которые уже делали прогноз
+    predicted_games = set()  # храним game_id или номера игр
     
     print("🚀 БОТ ГОТОВ К РАБОТЕ!", flush=True)
     print("=" * 60, flush=True)
@@ -526,11 +583,75 @@ def main():
                 save_history(history)
                 last_cleanup_time = current_time
             
-            if current_time - last_forced_check > 30:
-                print("🔄 Принудительная проверка...", flush=True)
-                check_results(history, all_messages)
-                last_forced_check = current_time
+            # === ОСНОВНАЯ ЛОГИКА: опрос API для поиска игр в лобби ===
+            games = get_active_games()
+            if games:
+                for game in games:
+                    game_id = str(game.get("id"))
+                    game_num = game.get("num")  # номер игры из API
+                    
+                    # Если номер не получен, пытаемся по ID (но лучше по num)
+                    if game_num is None:
+                        # Пропускаем, так как не знаем номер
+                        continue
+                    
+                    # Проверяем, не делали ли уже прогноз на эту игру
+                    if game_num in predicted_games:
+                        continue
+                    
+                    # Получаем данные игры (задержка и состояние)
+                    data, latency = get_game_data(game_id)
+                    if not data or latency is None:
+                        continue
+                    
+                    state_info = get_game_state(data)
+                    state = state_info.get("state", "0")
+                    is_started = state_info.get("is_started", False)
+                    is_finished = state_info.get("is_finished", False)
+                    
+                    # Если игра уже началась или завершилась — пропускаем
+                    if is_started or is_finished:
+                        continue
+                    
+                    # Теперь это игра в лобби (state=0 и карт нет)
+                    predicted_suit = predict_suit_by_latency(latency)
+                    if predicted_suit is None:
+                        print(f"⏭️ Игра #{game_num}: задержка {latency:.2f} мс — нет прогноза", flush=True)
+                        continue
+                    
+                    # Проверяем интервал между прогнозами
+                    if current_time - LAST_PREDICT_TIME < PREDICT_INTERVAL:
+                        print(f"⏳ Интервал {int(current_time - LAST_PREDICT_TIME)} сек", flush=True)
+                        continue
+                    
+                    # Отправляем прогноз на игру в лобби
+                    msg = f"🔮 <b>ПРОГНОЗ (ЛОББИ)</b>\n"
+                    msg += f"📊 Игра: #N{game_num} (скоро начнётся)\n"
+                    msg += f"🃏 Масть: {predicted_suit}\n"
+                    msg += f"🎯 Целевая игра: #N{game_num}\n"
+                    msg += f"📈 3 игры догон\n"
+                    msg += f"⏰ {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}"
+                    
+                    message_id = send_message(msg)
+                    if message_id:
+                        print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #N{game_num} → масть {predicted_suit}", flush=True)
+                        LAST_PREDICT_TIME = current_time
+                        predicted_games.add(game_num)
+                        
+                        history.append({
+                            "from_game": game_num,
+                            "target": game_num,
+                            "suit": predicted_suit,
+                            "time": datetime.now(MOSCOW_TZ).isoformat(),
+                            "status": "pending",
+                            "message_id": message_id
+                        })
+                        save_history(history)
+                        
+                        pending_count = len([h for h in history if h.get('status') == 'pending'])
+                        print(f"📊 Ожидающих: {pending_count}", flush=True)
             
+            # === ЧТЕНИЕ КАНАЛА ДЛЯ ПРОВЕРКИ РЕЗУЛЬТАТОВ ===
             updates = get_updates(offset)
             
             for update in updates.get("result", []):
@@ -561,114 +682,17 @@ def main():
                     all_messages = all_messages[-500:]
                 
                 print(f"📥 Получена игра #N{game_number}", flush=True)
-                print(f"📝 Текст: {text[:100]}...", flush=True)
                 
                 if '✅' in text or '🔰' in text:
                     print(f"✅ #N{game_number} завершена - проверяем", flush=True)
                     check_results(history, all_messages)
-                    continue
-                
-                print(f"⏭️ #N{game_number} не завершена", flush=True)
-                
-                # Проверяем, есть ли уже прогноз на эту игру
-                if game_number in PROCESSED_GAMES:
-                    print(f"⏭️ #N{game_number} уже обработана", flush=True)
-                    continue
-                
-                # Парсим текущую игру для фильтра по дилеру
-                game_data = parse_game_from_text(text)
-                if not game_data:
-                    print(f"❌ Не удалось распарсить #N{game_number}", flush=True)
-                    continue
-                
-                # Получаем задержку
-                # Сначала пытаемся найти game_id по номеру из кэша
-                game_id = get_game_id_by_number(game_number)
-                
-                # Если не нашли, получаем активные игры и ищем через num
-                if game_id is None:
-                    games = get_active_games()
-                    if not games:
-                        print(f"⚠️ Нет активных игр, не могу получить задержку для #N{game_number}", flush=True)
-                        continue
-                    # Ищем в активных играх по num
-                    for game in games:
-                        if game.get("num") == game_number:
-                            game_id = str(game.get("id"))
-                            GAME_ID_CACHE[game_id] = game_number
-                            break
-                
-                if game_id is None:
-                    print(f"⚠️ Не найден game_id для #N{game_number}, используем первую активную игру", flush=True)
-                    # Берём первую активную игру
-                    games = get_active_games()
-                    if not games:
-                        print(f"⚠️ Нет активных игр, пропускаем #N{game_number}", flush=True)
-                        continue
-                    game_id = str(games[0].get("id"))
-                    # Пытаемся сохранить в кэш
-                    num = games[0].get("num")
-                    if num:
-                        GAME_ID_CACHE[game_id] = int(num)
-                
-                data, latency = get_game_data(game_id)
-                if not data or latency is None:
-                    print(f"⚠️ Не удалось получить задержку для game_id {game_id}", flush=True)
-                    continue
-                
-                # Прогноз по задержке
-                predicted_suit = predict_suit_by_latency(latency)
-                if predicted_suit is None:
-                    print(f"⏭️ Задержка {latency:.2f} мс — нет прогноза для #N{game_number}", flush=True)
-                    continue
-                
-                # ФИЛЬТР: если масть уже есть у дилера в текущей игре — пропускаем
-                dealer_suits = game_data.get("dealer_suits", [])
-                if predicted_suit in dealer_suits:
-                    print(f"⏭️ Масть {predicted_suit} уже есть у дилера в #N{game_number}, пропускаем", flush=True)
-                    PROCESSED_GAMES.add(game_number)
-                    continue
-                
-                if current_time - LAST_PREDICT_TIME < PREDICT_INTERVAL:
-                    print(f"⏳ Интервал {int(current_time - LAST_PREDICT_TIME)} сек", flush=True)
-                    continue
-                
-                # Отправляем прогноз
-                msg = f"🔮 <b>ПРОГНОЗ</b>\n"
-                msg += f"📊 Игра: #N{game_number}\n"
-                msg += f"🃏 Масть: {predicted_suit}\n"
-                msg += f"🎯 Целевая игра: #N{game_number}\n"
-                msg += f"📈 3 игры догон\n"
-                msg += f"⏰ {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n"
-                msg += f"📌 Ставку можно сделать до начала игры!"
-                
-                message_id = send_message(msg)
-                if message_id:
-                    print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #N{game_number} → масть {predicted_suit}", flush=True)
-                    LAST_PREDICT_TIME = current_time
-                    PROCESSED_GAMES.add(game_number)
-                    
-                    history.append({
-                        "from_game": game_number,
-                        "target": game_number,
-                        "suit": predicted_suit,
-                        "time": datetime.now(MOSCOW_TZ).isoformat(),
-                        "status": "pending",
-                        "message_id": message_id
-                    })
-                    save_history(history)
-                    
-                    pending_count = len([h for h in history if h.get('status') == 'pending'])
-                    print(f"📊 Ожидающих: {pending_count}", flush=True)
             
+            # Принудительная проверка результатов
             check_results(history, all_messages)
             history = clean_memory(history)
             save_history(history)
             
-            if len(PROCESSED_GAMES) > 500:
-                PROCESSED_GAMES.clear()
-            
-            time.sleep(1)
+            time.sleep(2)
             
         except Exception as e:
             print(f"❌ Ошибка: {e}", flush=True)
