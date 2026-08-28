@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (СМЕЩЕНИЕ +10, БЕЗ ТАЙМАУТА)", flush=True)
+print("🃏 ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (СМЕЩЕНИЕ +10, БЕЗ ТАЙМАУТА) + ВЕРОЯТНОСТИ", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -44,12 +44,14 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 BASE_URL = "https://1xlite-36553.pro"
 OFFSET_FILE = "offset_seq_no_timeout.txt"
 HISTORY_FILE = "history_seq_no_timeout.json"
+PROBS_LOG_FILE = "prob_diff_log.json"  # для логирования разниц
 MAX_HISTORY = 500
 PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
 PREDICT_INTERVAL = 2
 TIMEOUT_SECONDS = 1800  # 30 минут
 OFFSET = 10
+MIN_PROB_DIFF = 0  # пока 0, чтобы не отсеивать
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -61,6 +63,38 @@ HEADERS = {
 SUITS_NAMES = {0: "♠️", 1: "♣️", 2: "♦️", 3: "♥️"}
 
 # =====================================================================
+# ТАБЛИЦА ВЕРОЯТНОСТЕЙ (ПРОЦЕНТЫ)
+# =====================================================================
+LATENCY_PROBS = {
+    (93, 95): {"♣️": 28.3, "♥️": 24.5, "♠️": 23.5, "♦️": 23.7},
+    (95, 97): {"♠️": 29.1, "♥️": 28.7, "♣️": 21.5, "♦️": 20.7},
+    (97, 99): {"♦️": 26.7, "♠️": 25.9, "♣️": 24.5, "♥️": 22.9},
+    (99, 101): {"♥️": 27.4, "♦️": 25.3, "♠️": 24.2, "♣️": 23.1},
+    (101, 103): {"♣️": 26.5, "♠️": 25.1, "♥️": 24.8, "♦️": 23.6},
+    (103, 105): {"♥️": 27.8, "♦️": 24.6, "♣️": 24.2, "♠️": 23.4},
+    (105, 200): {"♠️": 27.6, "♣️": 25.9, "♥️": 24.3, "♦️": 22.2},
+}
+
+def get_suit_probs(latency):
+    for (low, high), probs in LATENCY_PROBS.items():
+        if low <= latency < high:
+            return probs
+    return None
+
+def predict_suit_with_probs(latency):
+    """Возвращает (основная_масть, процент, вторая_масть, процент_второй, разница)"""
+    probs = get_suit_probs(latency)
+    if not probs:
+        return None, None, None, None, None
+    
+    sorted_probs = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+    top_suit, top_prob = sorted_probs[0]
+    second_suit, second_prob = sorted_probs[1] if len(sorted_probs) > 1 else (None, 0)
+    diff = top_prob - second_prob if second_suit else 0
+    
+    return top_suit, top_prob, second_suit, second_prob, diff
+
+# =====================================================================
 # СТАТИСТИКА
 # =====================================================================
 stats = {
@@ -70,6 +104,25 @@ stats = {
     "by_dogon": {0: 0, 1: 0, 2: 0, 3: 0},
     "last_report": time.time()
 }
+
+# Лог разниц (для анализа)
+prob_log = []
+
+def load_prob_log():
+    if os.path.exists(PROBS_LOG_FILE):
+        try:
+            with open(PROBS_LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_prob_log():
+    try:
+        with open(PROBS_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(prob_log[-1000:], f, indent=2, ensure_ascii=False)
+    except:
+        pass
 
 def update_stats(dogon_number, result):
     stats["total"] += 1
@@ -84,7 +137,7 @@ def update_stats(dogon_number, result):
 
 def send_stats_report():
     now = datetime.now(MOSCOW_TZ)
-    msg = f"📊 <b>СТАТИСТИКА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10)</b>\n"
+    msg = f"📊 <b>СТАТИСТИКА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10) + ВЕРОЯТНОСТИ</b>\n"
     msg += f"⏰ {now.strftime('%d.%m.%Y %H:%M:%S')}\n"
     msg += f"{'=' * 30}\n"
     msg += f"📈 Всего: {stats['total']}\n"
@@ -97,6 +150,15 @@ def send_stats_report():
     msg += f"<b>По догонам:</b>\n"
     for i in range(4):
         msg += f"  Догон {i}: {stats['by_dogon'].get(i, 0)}\n"
+    # Добавим статистику по разницам (если есть)
+    if prob_log:
+        diffs = [p["diff"] for p in prob_log if "diff" in p]
+        if diffs:
+            avg_diff = sum(diffs) / len(diffs)
+            msg += f"{'=' * 30}\n"
+            msg += f"📊 Средняя разница: {avg_diff:.2f}%\n"
+            msg += f"📊 Минимальная: {min(diffs):.2f}%\n"
+            msg += f"📊 Максимальная: {max(diffs):.2f}%\n"
     send_message(msg)
 
 # =====================================================================
@@ -142,10 +204,10 @@ def edit_message(message_id, text):
 
 def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
-    msg = f"🚀 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10, ПРОГНОЗ ЗА ~2 МИН)</b>\n"
+    msg = f"🚀 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10, ВЕРОЯТНОСТИ)</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
-    msg += f"📌 Прогноз: примерно за 2 минуты до целевой игры\n"
-    msg += f"🔄 Версия: 10.3 (без таймаута)"
+    msg += f"📌 Выводятся вероятности для каждой масти\n"
+    msg += f"🔄 Версия: 11.0 (с вероятностями)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -293,25 +355,9 @@ def get_game_number():
 # =====================================================================
 # ПРОГНОЗ
 # =====================================================================
-def predict_suit_by_latency(latency):
-    if 93 <= latency < 95:
-        return "♣️"
-    elif 95 <= latency < 97:
-        return "♠️"
-    elif 97 <= latency < 99:
-        return "♦️"
-    elif 99 <= latency < 101:
-        return "♥️"
-    elif 101 <= latency < 103:
-        return "♣️"
-    elif 103 <= latency < 105:
-        return "♥️"
-    elif latency >= 105:
-        return "♠️"
-    else:
-        return None
-
+# НОВАЯ ФУНКЦИЯ: используем predict_suit_with_probs
 def refine_by_sequence(p1, p2, p3, base_suit, latency):
+    # Оставляем без изменений (твоя логика)
     if 93 <= latency < 95:
         if p1 and p1.get("rank") == "7" and p1.get("suit") == "♣️":
             return "♥️"
@@ -405,7 +451,7 @@ def clean_memory(history):
     return history
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (БЕЗ ТАЙМАУТА)
+# ПРОВЕРКА РЕЗУЛЬТАТА
 # =====================================================================
 def check_results(history, all_messages):
     global stats
@@ -424,10 +470,6 @@ def check_results(history, all_messages):
         if not predicted_suit or not message_id:
             continue
         
-        # =====================================================
-        # ТАЙМАУТ УБРАН! Проверяем, даже если прошло много времени
-        # =====================================================
-        
         max_games_to_check = 4
         
         for i in range(max_games_to_check):
@@ -441,7 +483,6 @@ def check_results(history, all_messages):
             
             if not game_msg:
                 print(f"⏳ Ждем игру #N{game_to_check} для проверки масти {predicted_suit}", flush=True)
-                # Не выходим из цикла, ждём дальше
                 continue
             
             game_data = parse_game_from_text(game_msg)
@@ -461,12 +502,7 @@ def check_results(history, all_messages):
                 dogon_number = i
                 update_stats(dogon_number, "win")
                 
-                original_text = f"🔮 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10)</b>\n"
-                original_text += f"🃏 Масть: {predicted_suit}\n"
-                original_text += f"🎯 Целевая игра: #N{target}\n"
-                original_text += f"📈 3 игры догон\n"
-                original_text += f"⏰ {entry.get('time', '')[:16]}"
-                
+                original_text = entry.get("original_text", "")
                 if dogon_number == 0:
                     result_text = f"\n\n✅ <b>ЗАШЛО</b> в целевой игре: #N{game_to_check}"
                 else:
@@ -483,11 +519,7 @@ def check_results(history, all_messages):
                 print(f"❌ Масть {predicted_suit} НЕ НАЙДЕНА за {max_games_to_check} игр", flush=True)
                 update_stats(0, "lose")
                 
-                original_text = f"🔮 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10)</b>\n"
-                original_text += f"🃏 Масть: {predicted_suit}\n"
-                original_text += f"🎯 Целевая игра: #N{target}\n"
-                original_text += f"📈 3 игры догон\n"
-                original_text += f"⏰ {entry.get('time', '')[:16]}"
+                original_text = entry.get("original_text", "")
                 result_text = f"\n\n❌ <b>НЕ ЗАШЛО</b> (проверено {max_games_to_check} игр)"
                 
                 edit_message(message_id, original_text + result_text)
@@ -499,10 +531,13 @@ def check_results(history, all_messages):
 # ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def main():
-    global LAST_PREDICT_TIME, stats
+    global LAST_PREDICT_TIME, stats, prob_log
     
-    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10, БЕЗ ТАЙМАУТА)...", flush=True)
+    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10, ВЕРОЯТНОСТИ)...", flush=True)
     print("=" * 60, flush=True)
+    
+    # Загружаем лог разниц
+    prob_log = load_prob_log()
     
     send_startup_message()
     
@@ -591,9 +626,6 @@ def main():
                 current_game_num = get_game_number()
                 target_game = current_game_num + OFFSET
 
-                # +10 сохраняем. Прогноз пока только ставим в очередь.
-                # Фактический прогноз будет рассчитан, когда до цели
-                # останется одна игра (~2 минуты).
                 already_queued = any(
                     h.get("target") == target_game
                     and h.get("status") in ("scheduled", "pending")
@@ -633,9 +665,7 @@ def main():
                 print(f"📊 В очереди: {pending_count}", flush=True)
             
             # =========================================================
-            # ПЛАНИРОВЩИК: +10 НЕ МЕНЯЕМ.
-            # Прогноз рассчитывается примерно за 2 минуты до target_game.
-            # При интервале ~2 минуты между играми это games_left == 1.
+            # ПЛАНИРОВЩИК
             # =========================================================
             current_num = get_game_number()
 
@@ -684,15 +714,29 @@ def main():
                         current_game_data = parse_game_from_text(msg_text)
                         break
 
-                base_suit = predict_suit_by_latency(latency)
-                if base_suit is None:
+                # НОВЫЙ ПРОГНОЗ С ВЕРОЯТНОСТЯМИ
+                top_suit, top_prob, second_suit, second_prob, diff = predict_suit_with_probs(latency)
+                if top_suit is None:
                     print(
                         f"⏭️ Задержка {latency:.2f} мс — "
-                        "нет прогноза, повторим проверку",
+                        "нет данных для прогноза",
                         flush=True
                     )
                     continue
 
+                # Логируем разницу
+                prob_log.append({
+                    "timestamp": datetime.now(MOSCOW_TZ).isoformat(),
+                    "latency": latency,
+                    "top_suit": top_suit,
+                    "top_prob": top_prob,
+                    "second_suit": second_suit,
+                    "second_prob": second_prob,
+                    "diff": diff
+                })
+                save_prob_log()
+
+                base_suit = top_suit
                 predicted_suit = base_suit
 
                 if current_game_data:
@@ -724,7 +768,10 @@ def main():
                         predicted_suit = refined
 
                 msg = "🔮 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10)</b>\n"
-                msg += f"🃏 Масть: {predicted_suit}\n"
+                msg += f"🃏 Масть: {predicted_suit} ({top_prob:.1f}%)\n"
+                if second_suit:
+                    msg += f"🎲 Альтернатива: {second_suit} ({second_prob:.1f}%)\n"
+                    msg += f"📊 Разница: {diff:.1f}%\n"
 
                 if current_game_data:
                     p1 = (
@@ -765,11 +812,13 @@ def main():
                     entry["suit"] = predicted_suit
                     entry["time"] = datetime.now(MOSCOW_TZ).isoformat()
                     entry["message_id"] = message_id
+                    entry["original_text"] = msg
                     save_history(history)
 
                     print(
                         f"✅ ПРОГНОЗ ОТПРАВЛЕН: #N{target} → "
-                        f"масть {predicted_suit} (~2 минуты до игры)",
+                        f"масть {predicted_suit} ({top_prob:.1f}%), "
+                        f"разница {diff:.1f}%",
                         flush=True
                     )
 
