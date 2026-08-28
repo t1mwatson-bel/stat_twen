@@ -12,7 +12,7 @@ import pytz
 # =====================================================================
 sys.stdout.flush()
 print("=" * 60, flush=True)
-print("🃏 ТЕСТ: ПРОГНОЗ ПО ПОСЛЕДОВАТЕЛЬНОСТИ (СМЕЩЕНИЕ +10, БЕЗ БЛОКИРОВКИ)", flush=True)
+print("🃏 ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (СМЕЩЕНИЕ +10, БЕЗ ТАЙМАУТА)", flush=True)
 print("=" * 60, flush=True)
 
 # =====================================================================
@@ -42,14 +42,14 @@ print("✅ Все переменные заданы!", flush=True)
 # =====================================================================
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 BASE_URL = "https://1xlite-36553.pro"
-OFFSET_FILE = "offset_seq_no_block.txt"
-HISTORY_FILE = "history_seq_no_block.json"
+OFFSET_FILE = "offset_seq_no_timeout.txt"
+HISTORY_FILE = "history_seq_no_timeout.json"
 MAX_HISTORY = 500
 PROCESSED_GAMES = set()
 LAST_PREDICT_TIME = 0
 PREDICT_INTERVAL = 2
-TIMEOUT_SECONDS = 600
-OFFSET = 10  # Смещение прогноза на +10 игр
+TIMEOUT_SECONDS = 1800  # 30 минут
+OFFSET = 10
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -142,10 +142,10 @@ def edit_message(message_id, text):
 
 def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
-    msg = f"🚀 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10, БЕЗ БЛОКИРОВКИ)</b>\n"
+    msg = f"🚀 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10, БЕЗ ТАЙМАУТА)</b>\n"
     msg += f"⏰ Время: {now.strftime('%d.%m.%Y %H:%M:%S')} (МСК)\n"
-    msg += f"📌 Режим: Прогноз на каждую игру, смещение +10\n"
-    msg += f"🔄 Версия: 10.2 (без блокировки)"
+    msg += f"📌 Таймаут: 30 минут\n"
+    msg += f"🔄 Версия: 10.3 (без таймаута)"
     send_message(msg)
     print(f"📤 Приветствие отправлено в канал", flush=True)
 
@@ -291,7 +291,7 @@ def get_game_number():
     return game_number
 
 # =====================================================================
-# ПРОГНОЗ ПО ЗАДЕРЖКЕ + ПОСЛЕДОВАТЕЛЬНОСТИ
+# ПРОГНОЗ
 # =====================================================================
 def predict_suit_by_latency(latency):
     if 93 <= latency < 95:
@@ -405,7 +405,7 @@ def clean_memory(history):
     return history
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТА (С ДОГОНАМИ)
+# ПРОВЕРКА РЕЗУЛЬТАТА (БЕЗ ТАЙМАУТА)
 # =====================================================================
 def check_results(history, all_messages):
     global stats
@@ -424,24 +424,9 @@ def check_results(history, all_messages):
         if not predicted_suit or not message_id:
             continue
         
-        try:
-            created_ts = datetime.fromisoformat(created_time).timestamp()
-        except:
-            created_ts = 0
-        
-        if current_time - created_ts > TIMEOUT_SECONDS:
-            print(f"⏰ Таймаут! Прогноз #N{from_game} → #N{target}", flush=True)
-            update_stats(0, "lose")
-            original_text = f"🔮 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10)</b>\n"
-            original_text += f"🃏 Масть: {predicted_suit}\n"
-            original_text += f"🎯 Целевая игра: #N{target}\n"
-            original_text += f"📈 3 игры догон\n"
-            original_text += f"⏰ {entry.get('time', '')[:16]}"
-            result_text = f"\n\n⏰ <b>ТАЙМАУТ</b>"
-            edit_message(message_id, original_text + result_text)
-            entry["status"] = "lose"
-            save_history(history)
-            continue
+        # =====================================================
+        # ТАЙМАУТ УБРАН! Проверяем, даже если прошло много времени
+        # =====================================================
         
         max_games_to_check = 4
         
@@ -455,8 +440,9 @@ def check_results(history, all_messages):
                     break
             
             if not game_msg:
-                print(f"⏳ Ждем игру #N{game_to_check} для проверки", flush=True)
-                break
+                print(f"⏳ Ждем игру #N{game_to_check} для проверки масти {predicted_suit}", flush=True)
+                # Не выходим из цикла, ждём дальше
+                continue
             
             game_data = parse_game_from_text(game_msg)
             if not game_data:
@@ -471,7 +457,7 @@ def check_results(history, all_messages):
                     break
             
             if suit_found:
-                print(f"🎯 МАСТЬ {predicted_suit} НАЙДЕНА!", flush=True)
+                print(f"🎯 МАСТЬ {predicted_suit} НАЙДЕНА в игре #N{game_to_check}!", flush=True)
                 dogon_number = i
                 update_stats(dogon_number, "win")
                 
@@ -494,7 +480,7 @@ def check_results(history, all_messages):
                 return
             
             if i == max_games_to_check - 1:
-                print(f"❌ Масть {predicted_suit} НЕ НАЙДЕНА", flush=True)
+                print(f"❌ Масть {predicted_suit} НЕ НАЙДЕНА за {max_games_to_check} игр", flush=True)
                 update_stats(0, "lose")
                 
                 original_text = f"🔮 <b>ТЕСТ: ПОСЛЕДОВАТЕЛЬНОСТЬ (+10)</b>\n"
@@ -510,12 +496,12 @@ def check_results(history, all_messages):
                 return
 
 # =====================================================================
-# ОСНОВНОЙ ЦИКЛ (БЕЗ БЛОКИРОВКИ PENDING)
+# ОСНОВНОЙ ЦИКЛ
 # =====================================================================
 def main():
     global LAST_PREDICT_TIME, stats
     
-    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10, БЕЗ БЛОКИРОВКИ)...", flush=True)
+    print("🔄 ЗАПУСК ТЕСТА (ПОСЛЕДОВАТЕЛЬНОСТЬ +10, БЕЗ ТАЙМАУТА)...", flush=True)
     print("=" * 60, flush=True)
     
     send_startup_message()
@@ -594,9 +580,6 @@ def main():
                 
                 print(f"⏭️ #N{game_number} не завершена", flush=True)
                 
-                # =====================================================
-                # БЛОКИРОВКА УБРАНА!
-                # =====================================================
                 if game_number in PROCESSED_GAMES:
                     print(f"⏭️ #N{game_number} уже обработана", flush=True)
                     continue
@@ -618,7 +601,6 @@ def main():
                 if latency is None:
                     continue
                 
-                # === ПОЛУЧАЕМ ПОСЛЕДОВАТЕЛЬНОСТЬ ===
                 current_game_data = None
                 for msg in all_messages:
                     if f"#N{current_game_num}" in msg:
