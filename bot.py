@@ -110,7 +110,7 @@ if not BOT_TOKEN or not CHANNEL_STATS or not CHANNEL_PROGNOZ:
 # НАСТРОЙКИ
 # =====================================================================
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-BASE_URL = "https://1xlite-0687.pro"
+BASE_URL = "https://1xlite-36553.pro"
 
 DATA_FILE = "cards_data.json"
 HISTORY_FILE = "cards_history.json"
