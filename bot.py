@@ -1,57 +1,5 @@
 import os
 import sys
-import subprocess
-import importlib
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (САМОЕ ПЕРВОЕ!)
-# =====================================================================
-REQUIRED_PACKAGES = ['numpy', 'catboost', 'scikit-learn', 'requests', 'pytz']
-
-def install_package(package):
-    print(f"📦 Устанавливаю: {package}...", flush=True)
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
-        print(f"✅ {package} установлен!", flush=True)
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка установки {package}: {e}", flush=True)
-        return False
-
-def check_and_install_dependencies():
-    print("=" * 60, flush=True)
-    print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
-    print("=" * 60, flush=True)
-    
-    missing = []
-    for package in REQUIRED_PACKAGES:
-        try:
-            importlib.import_module(package.replace('-', '_'))
-            print(f"✅ {package} - уже установлен", flush=True)
-        except ImportError:
-            print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
-            missing.append(package)
-    
-    if missing:
-        print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
-        for package in missing:
-            if not install_package(package):
-                print(f"❌ Не удалось установить {package}", flush=True)
-                return False
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    else:
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    
-    print("=" * 60, flush=True)
-    return True
-
-if not check_and_install_dependencies():
-    print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
-    sys.exit(1)
-
-# =====================================================================
-# ТЕПЕРЬ ИМПОРТИРУЕМ ВСЁ ОСТАЛЬНОЕ
-# =====================================================================
 import requests
 import json
 import re
@@ -64,6 +12,65 @@ from collections import deque, defaultdict
 import warnings
 import gc
 warnings.filterwarnings('ignore')
+
+# =====================================================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# =====================================================================
+try:
+    import subprocess
+    import importlib
+
+    REQUIRED_PACKAGES = [
+        'numpy',
+        'catboost',
+        'scikit-learn',
+        'requests',
+        'pytz'
+    ]
+
+    def install_package(package):
+        print(f"📦 Устанавливаю: {package}...", flush=True)
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            print(f"✅ {package} установлен!", flush=True)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка установки {package}: {e}", flush=True)
+            return False
+
+    def check_and_install_dependencies():
+        print("=" * 60, flush=True)
+        print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
+        print("=" * 60, flush=True)
+        
+        missing = []
+        for package in REQUIRED_PACKAGES:
+            try:
+                importlib.import_module(package.replace('-', '_'))
+                print(f"✅ {package} - уже установлен", flush=True)
+            except ImportError:
+                print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
+                missing.append(package)
+        
+        if missing:
+            print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
+            for package in missing:
+                if not install_package(package):
+                    print(f"❌ Не удалось установить {package}", flush=True)
+                    return False
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        else:
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        
+        print("=" * 60, flush=True)
+        return True
+
+    if not check_and_install_dependencies():
+        print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
+        sys.exit(1)
+
+except Exception as e:
+    print(f"⚠️ Ошибка при проверке зависимостей: {e}", flush=True)
 
 # =====================================================================
 # ML-БИБЛИОТЕКА
@@ -612,7 +619,7 @@ def extract_features_from_game(game_data, latency, game_num):
     return features
 
 # =====================================================================
-# ОБУЧЕНИЕ МОДЕЛИ (исправлено)
+# ОБУЧЕНИЕ МОДЕЛИ
 # =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
@@ -941,7 +948,7 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# ПРОВЕРКА И ПРОГНОЗ (С ДОБАВЛЕННЫМ ПРАВИЛОМ)
+# ПРОВЕРКА И ПРОГНОЗ (С ПРАВИЛОМ P1, D1, P2, D2)
 # =====================================================================
 def check_and_predict():
     global predictions, all_messages, game_history
@@ -993,7 +1000,7 @@ def check_and_predict():
             continue
         
         # ============================================================
-        # 🔥 ДОБАВЛЕННОЕ ПРАВИЛО: проверяем, есть ли прогнозируемая карта среди P1, D1, P2
+        # 🔥 ПРАВИЛО: прогнозируемая карта НЕ должна быть среди P1, D1, P2, D2
         # ============================================================
         player_cards = current_game_data.get("player_cards", [])
         dealer_cards = current_game_data.get("dealer_cards", [])
@@ -1005,6 +1012,8 @@ def check_and_predict():
             check_cards.append(dealer_cards[0])  # D1
         if len(player_cards) > 1:
             check_cards.append(player_cards[1])  # P2
+        if len(dealer_cards) > 1:
+            check_cards.append(dealer_cards[1])  # D2
         
         predicted_card = predicted_cards[0][0]
         blocked = False
@@ -1015,7 +1024,7 @@ def check_and_predict():
                 break
         
         if blocked:
-            print(f"⏭️ Прогнозируемая карта {predicted_card} уже есть среди P1, D1, P2 → пропускаю прогноз для #{target}", flush=True)
+            print(f"⏭️ Прогнозируемая карта {predicted_card} уже есть среди P1, D1, P2, D2 → пропускаю прогноз для #{target}", flush=True)
             continue
         
         # ============================================================
@@ -1316,7 +1325,7 @@ def main():
             print(f"❌ Ошибка: {e}", flush=True)
             import traceback
             traceback.print_exc()
-            time.sleep(10)
+            time.sleep(30)
 
 if __name__ == "__main__":
     main()
