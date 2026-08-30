@@ -74,7 +74,7 @@ import gc
 warnings.filterwarnings('ignore')
 
 # =====================================================================
-# ML-БИБЛИОТЕКА (ИСПОЛЬЗУЕМ RANDOM FOREST ВМЕСТО CATBOOST)
+# ML-БИБЛИОТЕКА (ЗАМЕНА CATBOOST -> RANDOM FOREST)
 # =====================================================================
 from sklearn.ensemble import RandomForestClassifier
 ML_AVAILABLE = True
@@ -536,7 +536,7 @@ def get_history_features():
     return features
 
 # =====================================================================
-# ML-ФУНКЦИИ (ЗАМЕНА CATBOOST -> RANDOM FOREST)
+# ML-ФУНКЦИИ (CATBOOST ЗАМЕНЁН НА RANDOM FOREST)
 # =====================================================================
 def extract_features_from_game(game_data, latency, game_num):
     if not game_data:
@@ -613,7 +613,7 @@ def extract_features_from_game(game_data, latency, game_num):
     return features
 
 # =====================================================================
-# ОБУЧЕНИЕ НА RANDOM FOREST (ВМЕСТО CATBOOST)
+# ОБУЧЕНИЕ НА RANDOM FOREST
 # =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
@@ -664,7 +664,6 @@ def train_ml_model():
     X = np.array(X)
     y = np.array(y)
     
-    # ИСПОЛЬЗУЕМ RANDOM FOREST
     model = RandomForestClassifier(
         n_estimators=100,
         max_depth=8,
@@ -918,12 +917,12 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ ПРОГНОЗИРУЕМОЙ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
+# НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
 # =====================================================================
 def is_predicted_card_in_current_game(predicted_cards, current_game_data):
     """
     Проверяет, есть ли прогнозируемая карта среди первых двух карт игрока и дилера.
-    Если есть – возвращает True (прогноз блокируется).
+    Возвращает True, если карта найдена (прогноз блокируется).
     """
     if not predicted_cards or not current_game_data:
         return False
@@ -994,7 +993,7 @@ def check_and_predict():
             continue
         
         # ============================================================
-        # НОВОЕ ПРАВИЛО: если прогнозируемая карта уже есть в текущей игре – пропускаем
+        # НОВОЕ ПРАВИЛО: если карта уже есть в текущей игре – пропускаем
         # ============================================================
         if is_predicted_card_in_current_game(predicted_cards, current_game_data):
             predicted_card_str = ", ".join(predicted_cards)
@@ -1266,7 +1265,6 @@ def main():
             
             check_results()
             
-            # Переобучение каждые 3 минуты (как было в исходном коде)
             if current_time - last_train_time > 180:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
