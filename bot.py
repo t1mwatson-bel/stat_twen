@@ -914,12 +914,12 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# НОВОЕ ПРАВИЛО: ПРОВЕРКА КАРТЫ В ТЕКУЩЕЙ ИГРЕ
+# НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
 # =====================================================================
 def is_predicted_card_in_current_game(predicted_cards, current_game_data):
     """
     Проверяет, есть ли прогнозируемая карта среди первых двух карт игрока и дилера.
-    Если есть – возвращает True (прогноз блокируется).
+    Возвращает True, если карта найдена (прогноз блокируется).
     """
     if not predicted_cards or not current_game_data:
         return False
@@ -956,33 +956,52 @@ def check_and_predict():
         
         print(f"🔥 До цели #{target} осталось {games_left} игр! Делаю прогноз...", flush=True)
         
+        # ============================================================
+        # ПОЛУЧАЕМ ВСЕ ДАННЫЕ ИЗ API
+        # ============================================================
         latency = None
+        current_game_data = None
         active_games = get_active_games()
+        
         for game in active_games:
             game_id = str(game.get("id"))
             data, measured_latency, _, _ = get_game_data(game_id)
             if data:
                 latency = measured_latency
-                break
+                
+                # Парсим карты из API
+                player_cards, dealer_cards, state = parse_cards_and_state(data)
+                
+                if player_cards or dealer_cards:
+                    # Форматируем карты как в current_game_data
+                    formatted_player = []
+                    for card in player_cards:
+                        formatted_player.append({
+                            "rank": RANKS.get(card.get("CV", 0), "?"),
+                            "suit": SUITS_NAMES.get(card.get("CS", 0), "?")
+                        })
+                    
+                    formatted_dealer = []
+                    for card in dealer_cards:
+                        formatted_dealer.append({
+                            "rank": RANKS.get(card.get("CV", 0), "?"),
+                            "suit": SUITS_NAMES.get(card.get("CS", 0), "?")
+                        })
+                    
+                    current_game_data = {
+                        "number": current_num,
+                        "player_cards": formatted_player,
+                        "dealer_cards": formatted_dealer,
+                    }
+                    break
         
-        if latency is None:
-            print("⏳ Не удалось получить задержку", flush=True)
+        if latency is None or current_game_data is None:
+            print(f"⏳ Не удалось получить данные о текущей игре #{current_num} из API", flush=True)
             continue
         
-        current_game_data = None
-        for msg in all_messages:
-            if isinstance(msg, tuple):
-                text = msg[0]
-            else:
-                text = msg
-            if f"#N{current_num}" in text:
-                current_game_data = parse_game_from_text(text)
-                break
-        
-        if not current_game_data:
-            print(f"⏳ Нет данных о текущей игре #{current_num}", flush=True)
-            continue
-        
+        # ============================================================
+        # ДАЛЬШЕ ВСЁ КАК БЫЛО
+        # ============================================================
         predicted_cards, method, confidence = get_prediction(latency, current_game_data)
         
         if not predicted_cards or len(predicted_cards) < 2:
@@ -995,6 +1014,7 @@ def check_and_predict():
             print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
             continue
         
+        # Обновляем историю
         if current_game_data:
             all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
             update_game_history(latency, all_cards, current_num)
