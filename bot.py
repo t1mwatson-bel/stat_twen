@@ -1,5 +1,57 @@
 import os
 import sys
+import subprocess
+import importlib
+
+# =====================================================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (САМОЕ ПЕРВОЕ!)
+# =====================================================================
+REQUIRED_PACKAGES = ['numpy', 'catboost', 'scikit-learn', 'requests', 'pytz']
+
+def install_package(package):
+    print(f"📦 Устанавливаю: {package}...", flush=True)
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
+        print(f"✅ {package} установлен!", flush=True)
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка установки {package}: {e}", flush=True)
+        return False
+
+def check_and_install_dependencies():
+    print("=" * 60, flush=True)
+    print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
+    print("=" * 60, flush=True)
+    
+    missing = []
+    for package in REQUIRED_PACKAGES:
+        try:
+            importlib.import_module(package.replace('-', '_'))
+            print(f"✅ {package} - уже установлен", flush=True)
+        except ImportError:
+            print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
+            missing.append(package)
+    
+    if missing:
+        print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
+        for package in missing:
+            if not install_package(package):
+                print(f"❌ Не удалось установить {package}", flush=True)
+                return False
+        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+    else:
+        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+    
+    print("=" * 60, flush=True)
+    return True
+
+if not check_and_install_dependencies():
+    print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
+    sys.exit(1)
+
+# =====================================================================
+# ТЕПЕРЬ ИМПОРТИРУЕМ ВСЁ ОСТАЛЬНОЕ
+# =====================================================================
 import requests
 import json
 import re
@@ -12,65 +64,6 @@ from collections import deque, defaultdict
 import warnings
 import gc
 warnings.filterwarnings('ignore')
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
-# =====================================================================
-try:
-    import subprocess
-    import importlib
-
-    REQUIRED_PACKAGES = [
-        'numpy',
-        'catboost',
-        'scikit-learn',
-        'requests',
-        'pytz'
-    ]
-
-    def install_package(package):
-        print(f"📦 Устанавливаю: {package}...", flush=True)
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-            print(f"✅ {package} установлен!", flush=True)
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка установки {package}: {e}", flush=True)
-            return False
-
-    def check_and_install_dependencies():
-        print("=" * 60, flush=True)
-        print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
-        print("=" * 60, flush=True)
-        
-        missing = []
-        for package in REQUIRED_PACKAGES:
-            try:
-                importlib.import_module(package.replace('-', '_'))
-                print(f"✅ {package} - уже установлен", flush=True)
-            except ImportError:
-                print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
-                missing.append(package)
-        
-        if missing:
-            print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
-            for package in missing:
-                if not install_package(package):
-                    print(f"❌ Не удалось установить {package}", flush=True)
-                    return False
-            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-        else:
-            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-        
-        print("=" * 60, flush=True)
-        return True
-
-    if not check_and_install_dependencies():
-        print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
-        sys.exit(1)
-
-except Exception as e:
-    print(f"⚠️ Ошибка при проверке зависимостей: {e}", flush=True)
 
 # =====================================================================
 # ML-БИБЛИОТЕКА
@@ -774,7 +767,7 @@ def get_prediction(latency, current_game_data):
         return None, None, None
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТОВ (исправлено)
+# ПРОВЕРКА РЕЗУЛЬТАТОВ
 # =====================================================================
 def check_results():
     global predictions, stats, all_messages, ml_model
