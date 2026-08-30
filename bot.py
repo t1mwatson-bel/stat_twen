@@ -756,16 +756,17 @@ def get_prediction(latency, current_game_data):
     
     if ml_cards and confidence:
         print(f"📊 ML: топ-2 карты:", flush=True)
-        for i, (card, prob) in enumerate(ml_cards, 1):
-            print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
-        print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
-        print(f"   Порог: {ML_CONFIDENCE_THRESHOLD*100:.0f}%", flush=True)
+for i, (card, prob) in enumerate(ml_cards, 1):
+    print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
+print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
+print(f"   Порог: {ML_CONFIDENCE_THRESHOLD*100:.0f}%", flush=True)
         
         if confidence >= ML_CONFIDENCE_THRESHOLD:
             print(f"✅ Уверенность {confidence*100:.1f}% >= {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ДАЮ ПРОГНОЗ!", flush=True)
             return ml_cards, "ml", confidence
         else:
-            print(f"⏭️ Уверенность {confidence*100:.1f}% < {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ПРОПУСКАЮ", flush=True)
+            print(f"⏭️ Уверенность {confidence*100:.1f}% < {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ПРОПУСКАЮ")
+print(f"⏭️ Нет прогноза от ML для #{target}")
             return None, None, None
     else:
         print(f"⏭️ ML не выдал карты", flush=True)
