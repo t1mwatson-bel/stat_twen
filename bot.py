@@ -4,44 +4,14 @@ import requests
 import json
 import re
 import time
+import pickle
+import numpy as np
 from datetime import datetime, timedelta
 import pytz
 from collections import deque, defaultdict
 import warnings
-warnings.filterwarnings('ignore')
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (ДО ВСЕХ ОСТАЛЬНЫХ ИМПОРТОВ!)
-# =====================================================================
-def install_and_import(package):
-    try:
-        __import__(package.replace('-', '_'))
-        print(f"✅ {package} уже установлен")
-        return True
-    except ImportError:
-        print(f"📦 Устанавливаю {package}...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-            print(f"✅ {package} установлен!")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка установки {package}: {e}")
-            return False
-
-# Устанавливаем зависимости ДО импорта
-import subprocess
-REQUIRED_PACKAGES = ['numpy', 'catboost', 'scikit-learn', 'pytz']
-for pkg in REQUIRED_PACKAGES:
-    if not install_and_import(pkg):
-        print(f"⚠️ Не удалось установить {pkg}, бот может работать некорректно")
-
-# =====================================================================
-# ТЕПЕРЬ МОЖНО ИМПОРТИРОВАТЬ ВСЁ ОСТАЛЬНОЕ
-# =====================================================================
-import numpy as np
-import pickle
-from catboost import CatBoostClassifier
 import gc
+warnings.filterwarnings('ignore')
 
 # =====================================================================
 # АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
@@ -66,7 +36,6 @@ try:
             return True
         except Exception as e:
             print(f"❌ Ошибка установки {package}: {e}", flush=True)
-            print(f"⚠️ Попробуй установить вручную: pip install {package}", flush=True)
             return False
 
     def check_and_install_dependencies():
@@ -211,14 +180,7 @@ def get_updates(offset):
     params = {"offset": offset, "timeout": 30}
     try:
         response = requests.get(url, params=params, timeout=35)
-        data = response.json()
-        
-        # 🔥 ЛОГ: сколько обновлений
-        result_count = len(data.get("result", []))
-        if result_count > 0:
-            print(f"📨 Получено {result_count} обновлений от Telegram", flush=True)
-        
-        return data
+        return response.json()
     except Exception as e:
         print(f"❌ Ошибка getUpdates: {e}", flush=True)
         return {}
@@ -1001,12 +963,10 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# ПРОВЕРКА И ПРОГНОЗ (С ДЕТАЛЬНЫМИ ЛОГАМИ)
+# ПРОВЕРКА И ПРОГНОЗ (С ПРОВЕРКОЙ КОНКРЕТНОЙ КАРТЫ)
 # =====================================================================
 def check_and_predict():
     global predictions, all_messages, game_history
-    
-    print(f"🔍 check_and_predict() запущена. Прогнозов в очереди: {len([p for p in predictions if p.get('status') == 'scheduled'])}", flush=True)
     
     for entry in predictions:
         if entry.get("status") != "scheduled":
@@ -1016,8 +976,6 @@ def check_and_predict():
         current_num = get_game_number_by_time()
         games_left = target - current_num
         
-        print(f"📊 Проверка #{target}: current_num={current_num}, games_left={games_left}", flush=True)
-        
         if games_left != 2 and games_left != 1:
             continue
         
@@ -1025,14 +983,11 @@ def check_and_predict():
         
         latency = None
         active_games = get_active_games()
-        print(f"📡 Активных игр: {len(active_games)}", flush=True)
-        
         for game in active_games:
             game_id = str(game.get("id"))
             data, measured_latency, _, _ = get_game_data(game_id)
             if data:
                 latency = measured_latency
-                print(f"⏱️ Задержка от игры {game_id}: {latency:.1f}ms", flush=True)
                 break
         
         if latency is None:
@@ -1047,12 +1002,10 @@ def check_and_predict():
                 text = msg
             if f"#N{current_num}" in text:
                 current_game_data = parse_game_from_text(text)
-                print(f"📥 Найдена игра #{current_num} в сообщениях", flush=True)
                 break
         
         if not current_game_data:
-            print(f"⏳ Нет данных о текущей игре #{current_num} в all_messages", flush=True)
-            print(f"📋 all_messages содержит {len(all_messages)} сообщений", flush=True)
+            print(f"⏳ Нет данных о текущей игре #{current_num}", flush=True)
             continue
         
         predicted_cards, method, confidence = get_prediction(latency, current_game_data)
@@ -1061,7 +1014,9 @@ def check_and_predict():
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
         
-        # Проверка масти P1, D1, P2
+        # ============================================================
+        # 🔥 ПРОВЕРКА: прогнозируемая карта НЕ должна быть среди P1, D1, P2
+        # ============================================================
         player_cards = current_game_data.get("player_cards", [])
         dealer_cards = current_game_data.get("dealer_cards", [])
         
@@ -1073,18 +1028,20 @@ def check_and_predict():
         if len(player_cards) > 1:
             check_cards.append(player_cards[1])  # P2
         
-        predicted_suit = predicted_cards[0][0][-1]
+        # БЕРЁМ ПЕРВУЮ КАРТУ ИЗ ПРОГНОЗА
+        predicted_card = predicted_cards[0][0]  # например, "Q♥️"
         blocked = False
         for card in check_cards:
-            if card.get("suit") == predicted_suit:
+            card_str = card.get("rank", "") + card.get("suit", "")
+            if card_str == predicted_card:
                 blocked = True
-                print(f"⛔ Масть {predicted_suit} уже есть в карте {card.get('rank')}{card.get('suit')}", flush=True)
                 break
         
         if blocked:
-            print(f"⏭️ Масть {predicted_suit} уже есть среди P1, D1, P2 → пропускаю прогноз для #{target}", flush=True)
+            print(f"⏭️ Прогнозируемая карта {predicted_card} уже есть среди P1, D1, P2 → пропускаю прогноз для #{target}", flush=True)
             continue
         
+        # Если проверка пройдена → отправляем прогноз
         if current_game_data:
             all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
             update_game_history(latency, all_cards, current_num)
