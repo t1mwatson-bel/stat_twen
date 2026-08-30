@@ -427,7 +427,7 @@ def cache_game_latency(game_id, latency, game_number, timestamp=None):
     }
     
     save_latency_cache()
-    print(f"📊 Сохранена задержка {latency:.1f}мс для игры #{game_number} (ID: {game_id})", flush=True)
+    print(f"📊 Сохранена задержка {latency:.1f}мс для игры #{game_number}", flush=True)
 
 
 # =====================================================================
@@ -739,7 +739,7 @@ def get_upcoming_games():
                                                             "game": game
                                                         })
                                                         
-                                                        print(f"📅 Будущая игра #{game_num} (порядковый), начнётся через {minutes_until:.1f} мин", flush=True)
+                                                        print(f"📅 Будущая игра #{game_num}, начнётся через {minutes_until:.1f} мин", flush=True)
         else:
             print(f"⚠️ Неожиданный формат данных: {type(data)}", flush=True)
             return []
@@ -751,81 +751,9 @@ def get_upcoming_games():
         return []
 
 
-def make_prediction_for_game(game_num, game_id, latency, current_game_data):
-    """
-    Делает прогноз для конкретной игры
-    """
-    global predictions, stats, game_history
-    
-    if not current_game_data:
-        print(f"⏳ Нет данных для игры #{game_num}", flush=True)
-        return False
-    
-    # Получаем ML прогноз
-    predicted_cards, method, confidence = get_prediction(latency, current_game_data)
-    
-    if not predicted_cards or len(predicted_cards) < 2:
-        print(f"⏭️ Нет прогноза от ML для #{game_num}", flush=True)
-        return False
-    
-    # Обновляем историю игр
-    all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
-    update_game_history(latency, all_cards, game_num)
-    
-    # Формируем сообщение
-    total_prob = 0
-    msg = "🔮 ТОЧНАЯ КАРТА (ML ТОП-2)\n\n"
-    msg += f"🎯 Игра: #N{game_num}\n"
-    msg += f"🤖 Метод: ML (увер. {confidence*100:.1f}%)\n"
-    msg += f"⏰ Прогноз: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n\n"
-    msg += "📊 Топ-2 карты:\n"
-    
-    cards_list = []
-    
-    for i, (card, prob) in enumerate(predicted_cards, 1):
-        cards_list.append(card)
-        msg += f"  {i}️⃣ {card} — {prob*100:.1f}%\n"
-        total_prob += prob
-    
-    msg += f"\n📊 Суммарная вероятность: {total_prob*100:.1f}%\n"
-    msg += f"📈 Догон: {DOGON_GAMES - 1} игр\n"
-    msg += "📍 Ищем: любую позицию (игрок/дилер)"
-    
-    # Отправляем прогноз
-    message_id = send_message(CHANNEL_PROGNOZ, msg)
-    
-    if message_id:
-        # Сохраняем прогноз
-        entry = {
-            "source": game_num,
-            "target": game_num,
-            "offset": 0,
-            "cards": cards_list,
-            "method": method,
-            "message_id": message_id,
-            "original_text": msg,
-            "status": "pending",
-            "latency": latency,
-            "confidence": confidence,
-            "created": datetime.now(MOSCOW_TZ).isoformat()
-        }
-        
-        predictions.append(entry)
-        
-        if len(predictions) > 200:
-            predictions = predictions[-200:]
-        
-        save_history(predictions)
-        
-        print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #{game_num} → {', '.join(cards_list)} (ML, уверенность {confidence*100:.1f}%)", flush=True)
-        return True
-    
-    return False
-
-
 def check_upcoming_games():
     """
-    Проверяет будущие игры и сразу даёт прогноз на них
+    Проверяет будущие игры, замеряет задержку и сразу даёт прогноз
     """
     upcoming = get_upcoming_games()
     
@@ -850,13 +778,21 @@ def check_upcoming_games():
         if already_predicted:
             continue
         
-        print(f"🔥 Игра #{game_num} появилась в лобби! Делаю прогноз...", flush=True)
+        print(f"🔥 Игра #{game_num} появилась в лобби! Замеряю задержку...", flush=True)
         
-        # Замеряем задержку и получаем данные
-        latency = None
-        current_game_data = None
-        
+        # Замеряем задержку
         data, measured_latency, _, _ = get_game_data(game_id)
+        
+        if measured_latency is not None:
+            latency = measured_latency
+            cache_game_latency(game_id, latency, game_num)
+            print(f"📊 Замерена задержка: {latency:.1f}мс", flush=True)
+        else:
+            latency = 500
+            print(f"📊 Использую задержку по умолчанию: {latency}мс", flush=True)
+        
+        # Получаем данные игры для ML
+        current_game_data = None
         
         if data:
             player_cards_raw, dealer_cards_raw, state = parse_cards_and_state(data)
@@ -883,21 +819,77 @@ def check_upcoming_games():
                 "dealer_cards": dealer_cards,
                 "state": state
             }
-            
-            latency = measured_latency
-            if latency is not None:
-                cache_game_latency(game_id, latency, game_num)
         
-        if latency is None:
-            latency = 500
-            print(f"📊 Использую задержку по умолчанию: {latency}мс", flush=True)
+        # ✅ ДЕЛАЕМ ПРОГНОЗ СРАЗУ НА ОСНОВЕ ЗАДЕРЖКИ
+        if current_game_data:
+            predicted_cards, method, confidence = get_prediction(latency, current_game_data)
+        else:
+            # Если нет данных, делаем прогноз только по задержке
+            features = {
+                "latency": latency,
+                "game_num": game_num % 100,
+                "hour": datetime.now(MOSCOW_TZ).hour,
+                "minute": datetime.now(MOSCOW_TZ).minute,
+                "day_of_week": datetime.now(MOSCOW_TZ).weekday(),
+                "is_weekend": 1 if datetime.now(MOSCOW_TZ).weekday() >= 5 else 0,
+            }
+            predicted_cards, confidence = predict_ml(features)
+            method = "ml"
         
-        if not current_game_data:
-            print(f"⏳ Нет данных API о игре #{game_num}", flush=True)
+        if not predicted_cards or len(predicted_cards) < 2:
+            print(f"⏭️ Нет прогноза от ML для #{game_num}", flush=True)
             continue
         
-        # Делаем прогноз
-        make_prediction_for_game(game_num, game_id, latency, current_game_data)
+        # Обновляем историю игр
+        if current_game_data:
+            all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
+            update_game_history(latency, all_cards, game_num)
+        
+        # Формируем сообщение (БЕЗ ЗАДЕРЖКИ)
+        total_prob = 0
+        msg = "🔮 ТОЧНАЯ КАРТА (ML ТОП-2)\n\n"
+        msg += f"🎯 Игра: #N{game_num}\n"
+        msg += f"🤖 Метод: ML (увер. {confidence*100:.1f}%)\n"
+        msg += f"⏰ Прогноз: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n\n"
+        msg += "📊 Топ-2 карты:\n"
+        
+        cards_list = []
+        
+        for i, (card, prob) in enumerate(predicted_cards, 1):
+            cards_list.append(card)
+            msg += f"  {i}️⃣ {card} — {prob*100:.1f}%\n"
+            total_prob += prob
+        
+        msg += f"\n📊 Суммарная вероятность: {total_prob*100:.1f}%\n"
+        msg += f"📈 Догон: {DOGON_GAMES - 1} игр\n"
+        msg += "📍 Ищем: любую позицию (игрок/дилер)"
+        
+        # Отправляем прогноз
+        message_id = send_message(CHANNEL_PROGNOZ, msg)
+        
+        if message_id:
+            entry = {
+                "source": game_num,
+                "target": game_num,
+                "offset": 0,
+                "cards": cards_list,
+                "method": method,
+                "message_id": message_id,
+                "original_text": msg,
+                "status": "pending",
+                "latency": latency,
+                "confidence": confidence,
+                "created": datetime.now(MOSCOW_TZ).isoformat()
+            }
+            
+            predictions.append(entry)
+            
+            if len(predictions) > 200:
+                predictions = predictions[-200:]
+            
+            save_history(predictions)
+            
+            print(f"✅ ПРОГНОЗ ОТПРАВЛЕН: #{game_num} → {', '.join(cards_list)} (ML, уверенность {confidence*100:.1f}%)", flush=True)
 
 
 # =====================================================================
