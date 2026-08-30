@@ -1,57 +1,5 @@
 import os
 import sys
-import subprocess
-import importlib
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (САМОЕ ПЕРВОЕ!)
-# =====================================================================
-REQUIRED_PACKAGES = ['numpy', 'catboost', 'scikit-learn', 'requests', 'pytz']
-
-def install_package(package):
-    print(f"📦 Устанавливаю: {package}...", flush=True)
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
-        print(f"✅ {package} установлен!", flush=True)
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка установки {package}: {e}", flush=True)
-        return False
-
-def check_and_install_dependencies():
-    print("=" * 60, flush=True)
-    print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
-    print("=" * 60, flush=True)
-    
-    missing = []
-    for package in REQUIRED_PACKAGES:
-        try:
-            importlib.import_module(package.replace('-', '_'))
-            print(f"✅ {package} - уже установлен", flush=True)
-        except ImportError:
-            print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
-            missing.append(package)
-    
-    if missing:
-        print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
-        for package in missing:
-            if not install_package(package):
-                print(f"❌ Не удалось установить {package}", flush=True)
-                return False
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    else:
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    
-    print("=" * 60, flush=True)
-    return True
-
-if not check_and_install_dependencies():
-    print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
-    sys.exit(1)
-
-# =====================================================================
-# ТЕПЕРЬ ИМПОРТИРУЕМ ВСЁ ОСТАЛЬНОЕ
-# =====================================================================
 import requests
 import json
 import re
@@ -64,6 +12,65 @@ from collections import deque, defaultdict
 import warnings
 import gc
 warnings.filterwarnings('ignore')
+
+# =====================================================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# =====================================================================
+try:
+    import subprocess
+    import importlib
+
+    REQUIRED_PACKAGES = [
+        'numpy',
+        'catboost',
+        'scikit-learn',
+        'requests',
+        'pytz'
+    ]
+
+    def install_package(package):
+        print(f"📦 Устанавливаю: {package}...", flush=True)
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            print(f"✅ {package} установлен!", flush=True)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка установки {package}: {e}", flush=True)
+            return False
+
+    def check_and_install_dependencies():
+        print("=" * 60, flush=True)
+        print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
+        print("=" * 60, flush=True)
+        
+        missing = []
+        for package in REQUIRED_PACKAGES:
+            try:
+                importlib.import_module(package.replace('-', '_'))
+                print(f"✅ {package} - уже установлен", flush=True)
+            except ImportError:
+                print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
+                missing.append(package)
+        
+        if missing:
+            print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
+            for package in missing:
+                if not install_package(package):
+                    print(f"❌ Не удалось установить {package}", flush=True)
+                    return False
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        else:
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        
+        print("=" * 60, flush=True)
+        return True
+
+    if not check_and_install_dependencies():
+        print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
+        sys.exit(1)
+
+except Exception as e:
+    print(f"⚠️ Ошибка при проверке зависимостей: {e}", flush=True)
 
 # =====================================================================
 # ML-БИБЛИОТЕКА
@@ -612,7 +619,7 @@ def extract_features_from_game(game_data, latency, game_num):
     return features
 
 # =====================================================================
-# ОБУЧЕНИЕ МОДЕЛИ (исправлено)
+# 🔥 НОВАЯ ФУНКЦИЯ ОБУЧЕНИЯ (УЧИТСЯ НА ВСЕХ ИГРАХ)
 # =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
@@ -666,6 +673,7 @@ def train_ml_model():
     X = np.array(X)
     y = np.array(y)
     
+    # 🔥 ИСПРАВЛЕННЫЙ CatBoost (без class_weights)
     if ML_LIB == "catboost":
         model = CatBoostClassifier(
             iterations=200,
@@ -750,24 +758,40 @@ def get_prediction(latency, current_game_data):
     global game_history
     
     if not ml_initialized:
+        print(f"⏳ ML модель не инициализирована", flush=True)
         return None, None, None
     
     if not current_game_data:
+        print(f"⏳ Нет данных о текущей игре", flush=True)
         return None, None, None
     
     features = extract_features_from_game(current_game_data, latency, 0)
     if not features:
+        print(f"⏳ Не удалось извлечь признаки", flush=True)
         return None, None, None
     
     ml_cards, confidence = predict_ml(features)
     
-    if ml_cards and confidence and confidence >= ML_CONFIDENCE_THRESHOLD:
-        return ml_cards, "ml", confidence
+    if ml_cards and confidence:
+        # 🔥 Показываем ВСЕ вероятности (топ-5)
+        print(f"📊 ML: топ-5 карт:", flush=True)
+        for i, (card, prob) in enumerate(ml_cards, 1):
+            print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
+        print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
+        print(f"   Порог: {ML_CONFIDENCE_THRESHOLD*100:.0f}%", flush=True)
+        
+        if confidence >= ML_CONFIDENCE_THRESHOLD:
+            print(f"✅ Уверенность {confidence*100:.1f}% >= {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ДАЮ ПРОГНОЗ!", flush=True)
+            return ml_cards, "ml", confidence
+        else:
+            print(f"⏭️ Уверенность {confidence*100:.1f}% < {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ПРОПУСКАЮ", flush=True)
+            return None, None, None
     else:
+        print(f"⏭️ ML не выдал карты", flush=True)
         return None, None, None
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТОВ (исправлено)
+# 🔥 НОВАЯ ФУНКЦИЯ ПРОВЕРКИ РЕЗУЛЬТАТОВ (УЧИТСЯ НА ОШИБКАХ)
 # =====================================================================
 def check_results():
     global predictions, stats, all_messages, ml_model
@@ -824,6 +848,9 @@ def check_results():
                     found_card = card_str
                     break
 
+            # ===========================================
+            # СЛУЧАЙ 1: ПРОГНОЗ ЗАШЁЛ
+            # ===========================================
             if found:
                 print(f"🎯 КАРТА НАЙДЕНА! {found_card} в игре #{game_to_check} (догон {i})", flush=True)
 
@@ -847,6 +874,9 @@ def check_results():
                 save_history(predictions)
                 return
 
+            # ===========================================
+            # СЛУЧАЙ 2: ПРОГНОЗ НЕ ЗАШЁЛ → УЧИМСЯ
+            # ===========================================
             if i == max_games_to_check - 1 and not found:
                 print(f"❌ Карты {', '.join(predicted_cards)} НЕ НАЙДЕНЫ за {max_games_to_check} игр", flush=True)
 
@@ -862,6 +892,7 @@ def check_results():
                     stats["lose"] += 1
                     stats["ml_losses"] += 1
 
+                    # 🔥 ДООБУЧАЕМ МОДЕЛЬ НА ЭТОЙ ОШИБКЕ
                     try:
                         features = extract_features_from_game(game_data, game_data.get("latency_ms", 0), target)
                         if features and ml_initialized:
@@ -941,8 +972,39 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# ПРОВЕРКА И ПРОГНОЗ (С ПРАВИЛОМ P1, D1, P2, D2)
+# 🔥 НОВАЯ ФУНКЦИЯ ПРОВЕРКИ ПРОГНОЗИРУЕМОЙ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
 # =====================================================================
+def is_predicted_card_in_current_game(predicted_cards, current_game_data):
+    """
+    Проверяет, есть ли прогнозируемая карта в первых двух картах игрока и дилера.
+    Возвращает True, если карта найдена (прогноз блокируется).
+    """
+    if not predicted_cards or not current_game_data:
+        return False
+    
+    # Получаем первые 2 карты игрока и первые 2 карты дилера
+    player_cards = current_game_data.get("player_cards", [])[:2]
+    dealer_cards = current_game_data.get("dealer_cards", [])[:2]
+    
+    # Объединяем все карты для проверки
+    check_cards = player_cards + dealer_cards
+    
+    # Преобразуем в формат "ранг+масть"
+    current_card_strings = []
+    for card in check_cards:
+        rank = card.get("rank", "")
+        suit = card.get("suit", "")
+        if rank and suit and rank != "?" and suit != "?":
+            current_card_strings.append(rank + suit)
+    
+    # Проверяем, есть ли прогнозируемая карта среди текущих
+    for predicted_card in predicted_cards:
+        # predicted_cards - это список карт, каждая карта это строка типа "J♠️"
+        if predicted_card in current_card_strings:
+            return True
+    
+    return False
+
 def check_and_predict():
     global predictions, all_messages, game_history
     
@@ -994,31 +1056,12 @@ def check_and_predict():
             continue
         
         # ============================================================
-        # 🔥 ПРОВЕРКА: прогнозируемая карта НЕ должна быть среди P1, D1, P2, D2
+        # 🔥 НОВОЕ ПРАВИЛО: Проверяем, есть ли прогнозируемая карта 
+        # в первых двух картах игрока и дилера
         # ============================================================
-        player_cards = current_game_data.get("player_cards", [])
-        dealer_cards = current_game_data.get("dealer_cards", [])
-        
-        check_cards = []
-        if len(player_cards) > 0:
-            check_cards.append(player_cards[0])  # P1
-        if len(dealer_cards) > 0:
-            check_cards.append(dealer_cards[0])  # D1
-        if len(player_cards) > 1:
-            check_cards.append(player_cards[1])  # P2
-        if len(dealer_cards) > 1:
-            check_cards.append(dealer_cards[1])  # D2
-        
-        predicted_card = predicted_cards[0][0]
-        blocked = False
-        for card in check_cards:
-            card_str = card.get("rank", "") + card.get("suit", "")
-            if card_str == predicted_card:
-                blocked = True
-                break
-        
-        if blocked:
-            print(f"⏭️ Прогнозируемая карта {predicted_card} уже есть среди P1, D1, P2, D2 → пропускаю прогноз для #{target}", flush=True)
+        if is_predicted_card_in_current_game(predicted_cards, current_game_data):
+            predicted_card_str = ", ".join(predicted_cards)
+            print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
             continue
         
         # ============================================================
@@ -1289,7 +1332,7 @@ def main():
             
             check_results()
             
-            # ПЕРЕОБУЧЕНИЕ КАЖДЫЕ 3 МИНУТЫ
+            # 🔥 ПЕРЕОБУЧЕНИЕ КАЖДЫЕ 3 МИНУТЫ
             if current_time - last_train_time > 180:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
