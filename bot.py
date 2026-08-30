@@ -1,5 +1,64 @@
 import os
 import sys
+import subprocess
+import importlib
+
+# =====================================================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (САМОЕ ПЕРВОЕ!)
+# =====================================================================
+REQUIRED_PACKAGES = [
+    'numpy',
+    'catboost',
+    'scikit-learn',
+    'requests',
+    'pytz'
+]
+
+def install_package(package):
+    print(f"📦 Устанавливаю: {package}...", flush=True)
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
+        print(f"✅ {package} установлен!", flush=True)
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка установки {package}: {e}", flush=True)
+        return False
+
+def check_and_install_dependencies():
+    print("=" * 60, flush=True)
+    print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
+    print("=" * 60, flush=True)
+    
+    missing = []
+    for package in REQUIRED_PACKAGES:
+        try:
+            importlib.import_module(package.replace('-', '_'))
+            print(f"✅ {package} - уже установлен", flush=True)
+        except ImportError:
+            print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
+            missing.append(package)
+    
+    if missing:
+        print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
+        for package in missing:
+            if not install_package(package):
+                print(f"❌ Не удалось установить {package}", flush=True)
+                print(f"⚠️ Попробуй установить вручную: pip install {package}", flush=True)
+                return False
+        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+    else:
+        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+    
+    print("=" * 60, flush=True)
+    return True
+
+if not check_and_install_dependencies():
+    print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
+    sys.exit(1)
+
+# =====================================================================
+# ТЕПЕРЬ ИМПОРТИРУЕМ ВСЁ ОСТАЛЬНОЕ
+# =====================================================================
 import requests
 import json
 import re
@@ -12,65 +71,6 @@ from collections import deque, defaultdict
 import warnings
 import gc
 warnings.filterwarnings('ignore')
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
-# =====================================================================
-try:
-    import subprocess
-    import importlib
-
-    REQUIRED_PACKAGES = [
-        'numpy',
-        'catboost',
-        'scikit-learn',
-        'requests',
-        'pytz'
-    ]
-
-    def install_package(package):
-        print(f"📦 Устанавливаю: {package}...", flush=True)
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-            print(f"✅ {package} установлен!", flush=True)
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка установки {package}: {e}", flush=True)
-            return False
-
-    def check_and_install_dependencies():
-        print("=" * 60, flush=True)
-        print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
-        print("=" * 60, flush=True)
-        
-        missing = []
-        for package in REQUIRED_PACKAGES:
-            try:
-                importlib.import_module(package.replace('-', '_'))
-                print(f"✅ {package} - уже установлен", flush=True)
-            except ImportError:
-                print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
-                missing.append(package)
-        
-        if missing:
-            print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
-            for package in missing:
-                if not install_package(package):
-                    print(f"❌ Не удалось установить {package}", flush=True)
-                    return False
-            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-        else:
-            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-        
-        print("=" * 60, flush=True)
-        return True
-
-    if not check_and_install_dependencies():
-        print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
-        sys.exit(1)
-
-except Exception as e:
-    print(f"⚠️ Ошибка при проверке зависимостей: {e}", flush=True)
 
 # =====================================================================
 # ML-БИБЛИОТЕКА
@@ -119,18 +119,15 @@ ML_MODEL_FILE = "cards_model.pkl"
 OFFSET_FILE = "cards_offset.txt"
 GAME_HISTORY_FILE = "cards_game_history.json"
 
-# 🔥 УМЕНЬШИЛ ДЛЯ ЭКОНОМИИ ПАМЯТИ
-MAX_RECORDS = 3000          # было 10000
+MAX_RECORDS = 3000
 CHECK_INTERVAL = 5
 OFFSET = 1
 MIN_TRAIN_SAMPLES = 300
-MAX_HISTORY = 500           # было 2000
-MAX_GAME_HISTORY = 5        # было 10
+MAX_HISTORY = 500
+MAX_GAME_HISTORY = 5
 DOGON_GAMES = 4
 ML_CONFIDENCE_THRESHOLD = 0.60
-
-# 🔥 ЛИМИТЫ ДЛЯ ОБУЧЕНИЯ (ЧТОБЫ НЕ ЖРАЛО ПАМЯТЬ)
-MAX_TRAIN_SAMPLES = 2000    # максимум примеров для обучения
+MAX_TRAIN_SAMPLES = 2000
 
 TARGET_CARDS = [
     "J♠️", "J♣️", "J♦️", "J♥️",
@@ -230,14 +227,13 @@ def send_startup_message():
     print("🚀 БОТ ЗАПУЩЕН!", flush=True)
 
 # =====================================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ (С ОГРАНИЧЕНИЕМ ПАМЯТИ)
+# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ
 # =====================================================================
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 🔥 Ограничиваем количество загружаемых данных
                 if len(data) > MAX_RECORDS:
                     data = data[-MAX_RECORDS:]
                 return data
@@ -266,7 +262,6 @@ def save_data(record):
         data.append(record)
         stats["games_collected"] += 1
     
-    # 🔥 Оставляем только последние MAX_RECORDS записей
     if len(data) > MAX_RECORDS:
         data = data[-MAX_RECORDS:]
         print(f"🧹 Очистка данных: оставлено {len(data)} записей", flush=True)
@@ -554,7 +549,7 @@ def get_history_features():
     return features
 
 # =====================================================================
-# ML-ФУНКЦИИ (С ОГРАНИЧЕНИЕМ ПАМЯТИ)
+# ML-ФУНКЦИИ
 # =====================================================================
 def extract_features_from_game(game_data, latency, game_num):
     if not game_data:
@@ -676,7 +671,6 @@ def train_ml_model():
         print(f"⚠️ ML: недостаточно примеров ({len(X)}/{MIN_TRAIN_SAMPLES})", flush=True)
         return False
     
-    # 🔥 ОГРАНИЧИВАЕМ РАЗМЕР ВЫБОРКИ ДЛЯ ОБУЧЕНИЯ
     if len(X) > MAX_TRAIN_SAMPLES:
         import random
         indices = random.sample(range(len(X)), MAX_TRAIN_SAMPLES)
@@ -692,7 +686,7 @@ def train_ml_model():
     
     if ML_LIB == "catboost":
         model = CatBoostClassifier(
-            iterations=150,  # уменьшил с 200 для экономии памяти
+            iterations=150,
             depth=6,
             learning_rate=0.08,
             random_seed=42,
@@ -709,7 +703,6 @@ def train_ml_model():
     ml_model = model
     ml_initialized = True
     
-    # 🔥 ОЧИЩАЕМ ПАМЯТЬ ПОСЛЕ ОБУЧЕНИЯ
     del X, y
     gc.collect()
     
@@ -718,7 +711,7 @@ def train_ml_model():
             pickle.dump({
                 'model': model,
                 'feature_count': len(feature_names),
-                'train_samples': len(X) if 'X' in locals() else 0,
+                'train_samples': len(data),
                 'total_games': len(data),
                 'feature_names': feature_names
             }, f)
@@ -1028,11 +1021,11 @@ def check_and_predict():
         
         check_cards = []
         if len(player_cards) > 0:
-            check_cards.append(player_cards[0])  # P1
+            check_cards.append(player_cards[0])
         if len(dealer_cards) > 0:
-            check_cards.append(dealer_cards[0])  # D1
+            check_cards.append(dealer_cards[0])
         if len(player_cards) > 1:
-            check_cards.append(player_cards[1])  # P2
+            check_cards.append(player_cards[1])
         
         predicted_card = predicted_cards[0][0]
         blocked = False
@@ -1311,7 +1304,6 @@ def main():
             
             check_results()
             
-            # 🔥 ПЕРЕОБУЧЕНИЕ КАЖДЫЕ 10 МИНУТ (было 3 минуты)
             if current_time - last_train_time > 600:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
@@ -1330,8 +1322,7 @@ def main():
                 predictions = predictions[-200:]
                 save_history(predictions)
             
-            # 🔥 ОЧИСТКА КЭША
-            if current_time % 300 < 1:  # раз в 5 минут
+            if current_time % 300 < 1:
                 gc.collect()
             
             time.sleep(CHECK_INTERVAL)
