@@ -58,7 +58,7 @@ if not check_and_install_dependencies():
     sys.exit(1)
 
 # =====================================================================
-# ТЕПЕРЬ МОЖНО ИМПОРТИРОВАТЬ ВСЕ ОСТАЛЬНЫЕ БИБЛИОТЕКИ
+# ИМПОРТЫ
 # =====================================================================
 import requests
 import json
@@ -536,7 +536,7 @@ def get_history_features():
     return features
 
 # =====================================================================
-# ML-ФУНКЦИИ (CATBOOST -> RANDOM FOREST)
+# ML-ФУНКЦИИ
 # =====================================================================
 def extract_features_from_game(game_data, latency, game_num):
     if not game_data:
@@ -612,6 +612,9 @@ def extract_features_from_game(game_data, latency, game_num):
     
     return features
 
+# =====================================================================
+# ОБУЧЕНИЕ RANDOM FOREST (ЗАМЕНА CATBOOST)
+# =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
     
@@ -755,18 +758,18 @@ def get_prediction(latency, current_game_data):
     ml_cards, confidence = predict_ml(features)
     
     if ml_cards and confidence:
+        # ВЫВОД В КОНСОЛЬ КАК В СТАРОМ БОТЕ
         print(f"📊 ML: топ-2 карты:", flush=True)
-for i, (card, prob) in enumerate(ml_cards, 1):
-    print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
-print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
-print(f"   Порог: {ML_CONFIDENCE_THRESHOLD*100:.0f}%", flush=True)
+        for i, (card, prob) in enumerate(ml_cards, 1):
+            print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
+        print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
+        print(f"   Порог: {ML_CONFIDENCE_THRESHOLD*100:.0f}%", flush=True)
         
         if confidence >= ML_CONFIDENCE_THRESHOLD:
             print(f"✅ Уверенность {confidence*100:.1f}% >= {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ДАЮ ПРОГНОЗ!", flush=True)
             return ml_cards, "ml", confidence
         else:
-            print(f"⏭️ Уверенность {confidence*100:.1f}% < {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ПРОПУСКАЮ")
-print(f"⏭️ Нет прогноза от ML для #{target}")
+            print(f"⏭️ Уверенность {confidence*100:.1f}% < {ML_CONFIDENCE_THRESHOLD*100:.0f}% → ПРОПУСКАЮ", flush=True)
             return None, None, None
     else:
         print(f"⏭️ ML не выдал карты", flush=True)
@@ -918,10 +921,6 @@ def schedule_for_game(game_number):
 # НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
 # =====================================================================
 def is_predicted_card_in_current_game(predicted_cards, current_game_data):
-    """
-    Проверяет, есть ли прогнозируемая карта среди первых двух карт игрока и дилера.
-    Возвращает True, если карта найдена (прогноз блокируется).
-    """
     if not predicted_cards or not current_game_data:
         return False
     
@@ -957,65 +956,45 @@ def check_and_predict():
         
         print(f"🔥 До цели #{target} осталось {games_left} игр! Делаю прогноз...", flush=True)
         
-        # ============================================================
-        # ПОЛУЧАЕМ ВСЕ ДАННЫЕ ИЗ API
-        # ============================================================
         latency = None
-        current_game_data = None
         active_games = get_active_games()
-        
         for game in active_games:
             game_id = str(game.get("id"))
             data, measured_latency, _, _ = get_game_data(game_id)
             if data:
                 latency = measured_latency
-                
-                # Парсим карты из API
-                player_cards, dealer_cards, state = parse_cards_and_state(data)
-                
-                if player_cards or dealer_cards:
-                    # Форматируем карты как в current_game_data
-                    formatted_player = []
-                    for card in player_cards:
-                        formatted_player.append({
-                            "rank": RANKS.get(card.get("CV", 0), "?"),
-                            "suit": SUITS_NAMES.get(card.get("CS", 0), "?")
-                        })
-                    
-                    formatted_dealer = []
-                    for card in dealer_cards:
-                        formatted_dealer.append({
-                            "rank": RANKS.get(card.get("CV", 0), "?"),
-                            "suit": SUITS_NAMES.get(card.get("CS", 0), "?")
-                        })
-                    
-                    current_game_data = {
-                        "number": current_num,
-                        "player_cards": formatted_player,
-                        "dealer_cards": formatted_dealer,
-                    }
-                    break
+                break
         
-        if latency is None or current_game_data is None:
-            print(f"⏳ Не удалось получить данные о текущей игре #{current_num} из API", flush=True)
+        if latency is None:
+            print("⏳ Не удалось получить задержку", flush=True)
             continue
         
-        # ============================================================
-        # ДАЛЬШЕ ВСЁ КАК БЫЛО
-        # ============================================================
+        current_game_data = None
+        for msg in all_messages:
+            if isinstance(msg, tuple):
+                text = msg[0]
+            else:
+                text = msg
+            if f"#N{current_num}" in text:
+                current_game_data = parse_game_from_text(text)
+                break
+        
+        if not current_game_data:
+            print(f"⏳ Нет данных о текущей игре #{current_num}", flush=True)
+            continue
+        
         predicted_cards, method, confidence = get_prediction(latency, current_game_data)
         
         if not predicted_cards or len(predicted_cards) < 2:
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
         
-        # НОВОЕ ПРАВИЛО: если карта уже есть в текущей игре – пропускаем
+        # НОВОЕ ПРАВИЛО
         if is_predicted_card_in_current_game(predicted_cards, current_game_data):
             predicted_card_str = ", ".join(predicted_cards)
             print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
             continue
         
-        # Обновляем историю
         if current_game_data:
             all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
             update_game_history(latency, all_cards, current_num)
