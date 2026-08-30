@@ -879,7 +879,8 @@ def check_results():
 
                 if actual_target:
                     print(f"📘 ОШИБКА: ждали {predicted_cards}, выпала {actual_target}")
-                    stats["total"] += 1                    stats["lose"] += 1
+                    stats["total"] += 1
+                    stats["lose"] += 1
                     stats["ml_losses"] += 1
 
                     try:
