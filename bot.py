@@ -1,65 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 import sys
-import subprocess
-import importlib
-
-# =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
-# =====================================================================
-REQUIRED_PACKAGES = [
-    'numpy',
-    'scikit-learn',
-    'requests',
-    'pytz'
-]
-
-def install_package(package):
-    print(f"📦 Устанавливаю: {package}...", flush=True)
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-        print(f"✅ {package} установлен!", flush=True)
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка установки {package}: {e}", flush=True)
-        return False
-
-def check_and_install_dependencies():
-    print("=" * 60, flush=True)
-    print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
-    print("=" * 60, flush=True)
-    
-    missing = []
-    for package in REQUIRED_PACKAGES:
-        try:
-            importlib.import_module(package.replace('-', '_'))
-            print(f"✅ {package} - уже установлен", flush=True)
-        except ImportError:
-            print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
-            missing.append(package)
-    
-    if missing:
-        print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
-        for package in missing:
-            if not install_package(package):
-                print(f"❌ Не удалось установить {package}", flush=True)
-                return False
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    else:
-        print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
-    
-    print("=" * 60, flush=True)
-    return True
-
-if not check_and_install_dependencies():
-    print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
-    sys.exit(1)
-
-# =====================================================================
-# ИМПОРТЫ
-# =====================================================================
 import requests
 import json
 import re
@@ -74,11 +14,76 @@ import gc
 warnings.filterwarnings('ignore')
 
 # =====================================================================
-# ML-БИБЛИОТЕКА (ЗАМЕНА CATBOOST -> RANDOM FOREST)
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
 # =====================================================================
-from sklearn.ensemble import RandomForestClassifier
-ML_AVAILABLE = True
-print("✅ scikit-learn загружен!", flush=True)
+try:
+    import subprocess
+    import importlib
+
+    REQUIRED_PACKAGES = [
+        'numpy',
+        'scikit-learn',
+        'requests',
+        'pytz'
+    ]
+
+    def install_package(package):
+        print(f"📦 Устанавливаю: {package}...", flush=True)
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            print(f"✅ {package} установлен!", flush=True)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка установки {package}: {e}", flush=True)
+            return False
+
+    def check_and_install_dependencies():
+        print("=" * 60, flush=True)
+        print("🔍 ПРОВЕРКА ЗАВИСИМОСТЕЙ...", flush=True)
+        print("=" * 60, flush=True)
+        
+        missing = []
+        for package in REQUIRED_PACKAGES:
+            try:
+                importlib.import_module(package.replace('-', '_'))
+                print(f"✅ {package} - уже установлен", flush=True)
+            except ImportError:
+                print(f"⚠️ {package} - НЕ НАЙДЕН", flush=True)
+                missing.append(package)
+        
+        if missing:
+            print(f"\n📦 Нужно установить: {', '.join(missing)}", flush=True)
+            for package in missing:
+                if not install_package(package):
+                    print(f"❌ Не удалось установить {package}", flush=True)
+                    return False
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        else:
+            print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
+        
+        print("=" * 60, flush=True)
+        return True
+
+    if not check_and_install_dependencies():
+        print("❌ ОШИБКА: Невозможно продолжить работу", flush=True)
+        sys.exit(1)
+
+except Exception as e:
+    print(f"⚠️ Ошибка при проверке зависимостей: {e}", flush=True)
+
+# =====================================================================
+# ML-БИБЛИОТЕКА
+# =====================================================================
+ML_AVAILABLE = False
+ML_LIB = None
+
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    ML_AVAILABLE = True
+    ML_LIB = "randomforest"
+    print("✅ RandomForest загружен!", flush=True)
+except ImportError:
+    print("⚠️ RandomForest не установлен. Работаем без ML.", flush=True)
 
 # =====================================================================
 # ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
@@ -613,10 +618,13 @@ def extract_features_from_game(game_data, latency, game_num):
     return features
 
 # =====================================================================
-# ОБУЧЕНИЕ RANDOM FOREST (ЗАМЕНА CATBOOST)
+# 🔥 НОВАЯ ФУНКЦИЯ ОБУЧЕНИЯ (УЧИТСЯ НА ВСЕХ ИГРАХ)
 # =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
+    
+    if not ML_AVAILABLE:
+        return False
     
     data = load_data()
     if len(data) < MIN_TRAIN_SAMPLES:
@@ -627,7 +635,7 @@ def train_ml_model():
     y = []
     feature_names = None
     
-    print(f"🧠 ML: начинаю обучение RandomForest на {len(data)} играх...", flush=True)
+    print(f"🧠 ML: начинаю обучение на {len(data)} играх...", flush=True)
     
     for game in data:
         all_cards = game.get("player_cards", []) + game.get("dealer_cards", [])
@@ -664,15 +672,15 @@ def train_ml_model():
     X = np.array(X)
     y = np.array(y)
     
-    model = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=8,
-        min_samples_split=3,
-        min_samples_leaf=1,
-        random_state=42,
-        n_jobs=1,
-        class_weight='balanced'
-    )
+    if ML_LIB == "randomforest":
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=10,
+            random_state=42,
+            n_jobs=1
+        )
+    else:
+        return False
     
     model.fit(X, y)
     ml_model = model
@@ -687,17 +695,17 @@ def train_ml_model():
                 'total_games': len(data),
                 'feature_names': feature_names
             }, f)
-        print(f"✅ Модель RandomForest сохранена! Обучено на {len(X)} примерах из {len(data)} игр", flush=True)
+        print(f"✅ Модель сохранена! Обучено на {len(X)} примерах из {len(data)} игр", flush=True)
         return True
     except Exception as e:
         print(f"⚠️ Ошибка сохранения: {e}", flush=True)
         return False
-    finally:
-        del X, y
-        gc.collect()
 
 def load_ml_model():
     global ml_model, ml_initialized
+    
+    if not ML_AVAILABLE:
+        return False
     
     if not os.path.exists(ML_MODEL_FILE):
         return False
@@ -758,8 +766,8 @@ def get_prediction(latency, current_game_data):
     ml_cards, confidence = predict_ml(features)
     
     if ml_cards and confidence:
-        # ВЫВОД В КОНСОЛЬ КАК В СТАРОМ БОТЕ
-        print(f"📊 ML: топ-2 карты:", flush=True)
+        # 🔥 Показываем ВСЕ вероятности (топ-5)
+        print(f"📊 ML: топ-5 карт:", flush=True)
         for i, (card, prob) in enumerate(ml_cards, 1):
             print(f"   {i}. {card} — {prob*100:.1f}%", flush=True)
         print(f"   Максимальная уверенность: {confidence*100:.1f}%", flush=True)
@@ -776,7 +784,7 @@ def get_prediction(latency, current_game_data):
         return None, None, None
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТОВ
+# 🔥 НОВАЯ ФУНКЦИЯ ПРОВЕРКИ РЕЗУЛЬТАТОВ (УЧИТСЯ НА ОШИБКАХ)
 # =====================================================================
 def check_results():
     global predictions, stats, all_messages, ml_model
@@ -833,6 +841,9 @@ def check_results():
                     found_card = card_str
                     break
 
+            # ===========================================
+            # СЛУЧАЙ 1: ПРОГНОЗ ЗАШЁЛ
+            # ===========================================
             if found:
                 print(f"🎯 КАРТА НАЙДЕНА! {found_card} в игре #{game_to_check} (догон {i})", flush=True)
 
@@ -856,6 +867,9 @@ def check_results():
                 save_history(predictions)
                 return
 
+            # ===========================================
+            # СЛУЧАЙ 2: ПРОГНОЗ НЕ ЗАШЁЛ → УЧИМСЯ
+            # ===========================================
             if i == max_games_to_check - 1 and not found:
                 print(f"❌ Карты {', '.join(predicted_cards)} НЕ НАЙДЕНЫ за {max_games_to_check} игр", flush=True)
 
@@ -871,7 +885,40 @@ def check_results():
                     stats["lose"] += 1
                     stats["ml_losses"] += 1
 
-                    result_text = f"\n\n❌ НЕ ЗАШЛО (проверено {max_games_to_check} игр)\n   Выпала: {actual_target}"
+                    # 🔥 ДООБУЧАЕМ МОДЕЛЬ НА ЭТОЙ ОШИБКЕ
+                    try:
+                        features = extract_features_from_game(game_data, game_data.get("latency_ms", 0), target)
+                        if features and ml_initialized:
+                            feature_vector = []
+                            for key in sorted(features.keys()):
+                                feature_vector.append(features[key])
+                            
+                            X_new = np.array([feature_vector])
+                            y_new = TARGET_CARDS.index(actual_target)
+                            
+                            if hasattr(ml_model, 'partial_fit'):
+                                ml_model.partial_fit(X_new, [y_new])
+                                print(f"✅ Мгновенное обучение: запомнил {actual_target}")
+                            else:
+                                error_file = "learning_errors.json"
+                                errors = []
+                                if os.path.exists(error_file):
+                                    with open(error_file, 'r') as f:
+                                        errors = json.load(f)
+                                errors.append({
+                                    "timestamp": datetime.now(MOSCOW_TZ).isoformat(),
+                                    "features": features,
+                                    "correct_card": actual_target,
+                                    "predicted_cards": predicted_cards,
+                                    "game_num": target
+                                })
+                                with open(error_file, 'w') as f:
+                                    json.dump(errors, f, indent=2)
+                                print(f"📝 Ошибка сохранена в {error_file}")
+                    except Exception as e:
+                        print(f"⚠️ Ошибка при дообучении: {e}")
+
+                    result_text = f"\n\n❌ НЕ ЗАШЛО (проверено {max_games_to_check} игр)\n   Выпала: {actual_target} (ошибка проанализирована)"
                     if message_id:
                         edit_message(message_id, original_text + result_text)
                     entry["status"] = "lose"
@@ -917,29 +964,6 @@ def schedule_for_game(game_number):
     save_history(predictions)
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
-# =====================================================================
-# НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
-# =====================================================================
-def is_predicted_card_in_current_game(predicted_cards, current_game_data):
-    if not predicted_cards or not current_game_data:
-        return False
-    
-    player_cards = current_game_data.get("player_cards", [])[:2]
-    dealer_cards = current_game_data.get("dealer_cards", [])[:2]
-    check_cards = player_cards + dealer_cards
-    
-    current_card_strings = []
-    for card in check_cards:
-        rank = card.get("rank", "")
-        suit = card.get("suit", "")
-        if rank and suit and rank != "?" and suit != "?":
-            current_card_strings.append(rank + suit)
-    
-    for predicted_card in predicted_cards:
-        if predicted_card in current_card_strings:
-            return True
-    return False
-
 def check_and_predict():
     global predictions, all_messages, game_history
     
@@ -983,18 +1007,36 @@ def check_and_predict():
             print(f"⏳ Нет данных о текущей игре #{current_num}", flush=True)
             continue
         
+        # Получаем прогноз
         predicted_cards, method, confidence = get_prediction(latency, current_game_data)
         
         if not predicted_cards or len(predicted_cards) < 2:
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
         
-        # НОВОЕ ПРАВИЛО
-        if is_predicted_card_in_current_game(predicted_cards, current_game_data):
-            predicted_card_str = ", ".join(predicted_cards)
-            print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
+        # ============================================================
+        # ПРОВЕРКА: если прогнозируемая карта уже есть в первых двух
+        # картах игрока или дилера — прогноз не даём
+        # ============================================================
+        predicted_card_names = [card for card, prob in predicted_cards]
+        player_check = current_game_data.get("player_cards", [])[:2]
+        dealer_check = current_game_data.get("dealer_cards", [])[:2]
+        check_cards = player_check + dealer_check
+
+        blocked = False
+        for card in check_cards:
+            card_str = card.get("rank", "") + card.get("suit", "")
+            if card_str in predicted_card_names:
+                blocked = True
+                break
+
+        if blocked:
+            print(f"⏭️ Прогнозируемая карта уже есть в первых двух картах игрока/дилера → пропускаю прогноз для #{target}", flush=True)
             continue
-        
+
+        # ============================================================
+        # Если проверка пройдена → отправляем прогноз
+        # ============================================================
         if current_game_data:
             all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
             update_game_history(latency, all_cards, current_num)
@@ -1260,6 +1302,7 @@ def main():
             
             check_results()
             
+            # 🔥 ПЕРЕОБУЧЕНИЕ КАЖДЫЕ 3 МИНУТЫ
             if current_time - last_train_time > 180:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
