@@ -121,7 +121,7 @@ ML_MODEL_FILE = "cards_model.pkl"
 OFFSET_FILE = "cards_offset.txt"
 GAME_HISTORY_FILE = "cards_game_history.json"
 
-MAX_RECORDS = 10000
+MAX_RECORDS = 3000               # уменьшено для экономии памяти
 CHECK_INTERVAL = 5
 OFFSET = 1
 MIN_TRAIN_SAMPLES = 300
@@ -174,12 +174,9 @@ finished_games = set()
 all_messages = []
 predictions = []
 
-# Кэш данных
-_cached_data = None
-_data_loaded = False
-_new_records_since_train = 0      # счётчик новых записей после последнего обучения
-RETRAIN_THRESHOLD = 500           # переобучаться каждые 500 новых записей
-_model_trained_on_startup = False
+# Счётчик новых записей для переобучения
+_new_records_since_train = 0
+RETRAIN_THRESHOLD = 500
 
 # =====================================================================
 # ФУНКЦИИ ТЕЛЕГРАМ
@@ -235,56 +232,51 @@ def send_startup_message():
     print("🚀 БОТ ЗАПУЩЕН!", flush=True)
 
 # =====================================================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ (С КЭШИРОВАНИЕМ)
+# ФУНКЦИИ ДЛЯ РАБОТЫ С ДАННЫМИ (БЕЗ КЭША)
 # =====================================================================
 def load_data():
-    """Загружает данные из файла один раз при первом вызове, кэширует их."""
-    global _cached_data, _data_loaded
-    if _data_loaded:
-        return _cached_data
+    """Загружает данные из файла при каждом вызове."""
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                _cached_data = json.load(f)
+                return json.load(f)
         except:
-            _cached_data = []
-    else:
-        _cached_data = []
-    _data_loaded = True
-    return _cached_data
+            return []
+    return []
 
 def save_data(record):
-    global _cached_data, collection_active, stats, _new_records_since_train
+    global collection_active, stats, _new_records_since_train
 
-    if not _data_loaded:
-        load_data()
-
-    if len(_cached_data) >= MAX_RECORDS:
+    data = load_data()
+    if len(data) >= MAX_RECORDS:
         collection_active = False
-        return _cached_data
+        return data
 
     existing_index = None
-    for i, r in enumerate(_cached_data):
+    for i, r in enumerate(data):
         if r.get("game_id") == record["game_id"]:
             existing_index = i
             break
 
     if existing_index is not None:
-        _cached_data[existing_index] = record
+        data[existing_index] = record
     else:
-        _cached_data.append(record)
+        data.append(record)
         stats["games_collected"] += 1
-        _new_records_since_train += 1   # увеличиваем счётчик новых записей
+        _new_records_since_train += 1
 
-    # Сохраняем в файл
+    # Ограничиваем размер
+    if len(data) > MAX_RECORDS:
+        data = data[-MAX_RECORDS:]
+
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(_cached_data, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-    if len(_cached_data) >= MAX_RECORDS:
+    if len(data) >= MAX_RECORDS:
         collection_active = False
         print(f"⏸️ СБОР ДАННЫХ ОСТАНОВЛЕН! Достигнут лимит {MAX_RECORDS}", flush=True)
 
-    return _cached_data
+    return data
 
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -332,18 +324,17 @@ def save_offset(offset):
         f.write(str(offset))
 
 # =====================================================================
-# ЗАГРУЗКА НАЧАЛЬНЫХ ДАННЫХ С GITHUB
+# ЗАГРУЗКА НАЧАЛЬНЫХ ДАННЫХ С GITHUB (ЕСЛИ НУЖНО)
 # =====================================================================
 GITHUB_DATA_URL = "https://raw.githubusercontent.com/t1mwatson-bel/stat_twen/main/cards_data.json"
 
 def download_initial_data():
     """
-    Скачивает cards_data.json с GitHub и объединяет с локальными данными.
-    Возвращает объединённый список.
+    Загружает начальные данные:
+    - если локальный файл существует и содержит >= MIN_TRAIN_SAMPLES записей,
+      использует только его;
+    - иначе скачивает с GitHub и объединяет с локальным.
     """
-    global _cached_data, _data_loaded, collection_active
-    
-    # Сначала загружаем локальные данные (если есть)
     local_data = []
     if os.path.exists(DATA_FILE):
         try:
@@ -352,11 +343,16 @@ def download_initial_data():
             print(f"📂 Загружено локальных записей: {len(local_data)}", flush=True)
         except:
             local_data = []
-    
-    # Скачиваем данные с GitHub
+
+    # Если локальных данных достаточно – используем только их
+    if len(local_data) >= MIN_TRAIN_SAMPLES:
+        print(f"✅ Локальных данных достаточно ({len(local_data)}), пропускаю скачивание с GitHub", flush=True)
+        return local_data
+
+    # Иначе скачиваем с GitHub
+    print(f"⚠️ Локальных данных мало ({len(local_data)}), скачиваю с GitHub...", flush=True)
     github_data = []
     try:
-        print(f"📥 Скачиваю начальные данные с GitHub...", flush=True)
         response = requests.get(GITHUB_DATA_URL, timeout=30)
         if response.status_code == 200:
             github_data = response.json()
@@ -365,8 +361,8 @@ def download_initial_data():
             print(f"⚠️ Не удалось скачать данные (код {response.status_code})", flush=True)
     except Exception as e:
         print(f"⚠️ Ошибка скачивания: {e}", flush=True)
-    
-    # Объединяем: сначала данные с GitHub, потом локальные (новые перезаписывают старые)
+
+    # Объединяем (локальные перезаписывают дубли)
     merged = {}
     for record in github_data:
         game_id = record.get("game_id")
@@ -376,29 +372,21 @@ def download_initial_data():
         game_id = record.get("game_id")
         if game_id:
             merged[game_id] = record
-    
+
     result = list(merged.values())
-    
-    # Если данных слишком много - обрезаем
     if len(result) > MAX_RECORDS:
         result = result[-MAX_RECORDS:]
-        print(f"✂️ Обрезано до {MAX_RECORDS} записей", flush=True)
-    
-    print(f"📊 Итого записей после объединения: {len(result)}", flush=True)
-    
-    # Сохраняем объединённые данные в файл
+
+    # Сохраняем в файл
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
-    
-    # Обновляем кэш
-    _cached_data = result
-    _data_loaded = True
-    
-    if len(result) >= MAX_RECORDS:
-        collection_active = False
-        print(f"⏸️ СБОР ДАННЫХ ОТКЛЮЧЁН (достигнут лимит {MAX_RECORDS})", flush=True)
-    
-    return result
+
+    # Очищаем временные объекты
+    del merged, github_data, local_data, result
+    gc.collect()
+
+    print(f"📊 Итого записей после объединения: {len(result) if 'result' in locals() else 0}", flush=True)
+    return result if 'result' in locals() else []
 
 # =====================================================================
 # ФУНКЦИИ API
@@ -707,7 +695,7 @@ def extract_features_from_game(game_data, latency, game_num):
     return features
 
 # =====================================================================
-# ОБУЧЕНИЕ ML МОДЕЛИ (С ОЧИСТКОЙ ПАМЯТИ)
+# ОБУЧЕНИЕ ML МОДЕЛИ
 # =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
@@ -715,7 +703,7 @@ def train_ml_model():
     if not ML_AVAILABLE:
         return False
     
-    data = load_data()  # используем кэш
+    data = load_data()  # читаем файл
     if len(data) < MIN_TRAIN_SAMPLES:
         print(f"⚠️ ML: недостаточно данных ({len(data)}/{MIN_TRAIN_SAMPLES})", flush=True)
         return False
@@ -763,8 +751,8 @@ def train_ml_model():
     
     if ML_LIB == "catboost":
         model = CatBoostClassifier(
-            iterations=150,      # уменьшено для экономии памяти
-            depth=4,             # уменьшено
+            iterations=150,
+            depth=4,
             learning_rate=0.08,
             random_seed=42,
             verbose=False,
@@ -795,7 +783,7 @@ def train_ml_model():
         return False
     finally:
         # Очищаем большие массивы
-        del X, y
+        del X, y, data
         gc.collect()
     
     return True
@@ -882,7 +870,7 @@ def get_prediction(latency, current_game_data):
         return None, None, None
 
 # =====================================================================
-# ПРОВЕРКА РЕЗУЛЬТАТОВ И ДООБУЧЕНИЕ
+# ПРОВЕРКА РЕЗУЛЬТАТОВ
 # =====================================================================
 def check_results():
     global predictions, stats, all_messages, ml_model
@@ -1029,7 +1017,7 @@ def check_results():
                     return
 
 # =====================================================================
-# ПЛАНИРОВЩИК И ПРОВЕРКА ПРОГНОЗИРУЕМОЙ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
+# ПЛАНИРОВЩИК И ПРОВЕРКА ПРОГНОЗИРУЕМОЙ КАРТЫ
 # =====================================================================
 def schedule_for_game(game_number):
     global predictions
@@ -1057,10 +1045,6 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 def is_predicted_card_in_current_game(predicted_cards, current_game_data):
-    """
-    Проверяет, есть ли прогнозируемая карта в первых двух картах игрока и дилера.
-    Возвращает True, если карта найдена (прогноз блокируется).
-    """
     if not predicted_cards or not current_game_data:
         return False
     
@@ -1129,7 +1113,6 @@ def check_and_predict():
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
         
-        # Проверка: есть ли прогнозируемая карта в текущей игре
         if is_predicted_card_in_current_game(predicted_cards, current_game_data):
             predicted_card_str = ", ".join(predicted_cards)
             print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
@@ -1224,20 +1207,7 @@ def collect_game_data():
             def format_card(c):
                 return {"rank": RANKS.get(c.get("CV", 0), "?"), "suit": SUITS_NAMES.get(c.get("CS", 0), "?")}
             
-            sequence = []
-            max_len = max(len(player_cards), len(dealer_cards))
-            for i in range(max_len):
-                if i < len(player_cards):
-                    pc = player_cards[i]
-                    rank = RANKS.get(pc.get("CV", 0), "?")
-                    suit = SUITS_NAMES.get(pc.get("CS", 0), "?")
-                    sequence.append({"position": i*2+1, "who": "P", "rank": rank, "suit": suit})
-                if i < len(dealer_cards):
-                    dc = dealer_cards[i]
-                    rank = RANKS.get(dc.get("CV", 0), "?")
-                    suit = SUITS_NAMES.get(dc.get("CS", 0), "?")
-                    sequence.append({"position": i*2+2, "who": "D", "rank": rank, "suit": suit})
-            
+            # sequence не используем, чтобы уменьшить размер данных
             record = {
                 "game_id": game_id,
                 "timestamp_msk": timestamp_msk_str,
@@ -1245,7 +1215,6 @@ def collect_game_data():
                 "state": state,
                 "player_cards": [format_card(c) for c in player_cards],
                 "dealer_cards": [format_card(c) for c in dealer_cards],
-                "sequence": sequence,
             }
             
             data = save_data(record)
@@ -1309,7 +1278,7 @@ def send_stats_report():
 # =====================================================================
 def main():
     global predictions, all_messages, stats, game_history, collection_active
-    global _new_records_since_train, _model_trained_on_startup
+    global _new_records_since_train
     
     print("🔄 ТОЧНАЯ КАРТА (ML ТОП-2) ЗАПУЩЕН", flush=True)
     print(f"📁 Данные в {DATA_FILE}", flush=True)
@@ -1321,7 +1290,7 @@ def main():
     print(f"🔄 Переобучение каждые {RETRAIN_THRESHOLD} новых записей", flush=True)
     print("=" * 60, flush=True)
     
-    # Загружаем начальные данные с GitHub + локальные
+    # Загружаем начальные данные (скачиваем с GitHub только если локальных мало)
     existing_data = download_initial_data()
     print(f"📊 Всего записей: {len(existing_data)}", flush=True)
     
@@ -1340,9 +1309,6 @@ def main():
     if len(existing_data) >= MIN_TRAIN_SAMPLES and not ml_initialized:
         print(f"🧠 Данных достаточно ({len(existing_data)}), обучаю модель...", flush=True)
         train_ml_model()
-        _model_trained_on_startup = True
-    elif len(existing_data) < MIN_TRAIN_SAMPLES:
-        print(f"⏳ Данных {len(existing_data)}/{MIN_TRAIN_SAMPLES}, ждём накопления...", flush=True)
     
     send_startup_message()
     
@@ -1363,8 +1329,8 @@ def main():
     print(f"📥 Загружено сообщений: {len(all_messages)}", flush=True)
     
     last_stats_time = time.time()
-    last_train_time = time.time()  # не используется, оставлено для совместимости
     last_check_time = time.time()
+    last_gc_time = time.time()
     offset = get_offset()
     
     print("🚀 БОТ ГОТОВ К РАБОТЕ!", flush=True)
@@ -1374,8 +1340,10 @@ def main():
         try:
             current_time = time.time()
             
+            # Сбор данных
             collect_game_data()
             
+            # Обработка обновлений
             updates = get_updates(offset)
             for update in updates.get("result", []):
                 offset = update["update_id"] + 1
@@ -1396,8 +1364,8 @@ def main():
                     continue
                 
                 all_messages.append((text, time.time()))
-                if len(all_messages) > 200:   # уменьшено с 500 до 200
-                    all_messages = all_messages[-200:]
+                if len(all_messages) > 100:   # ограничение для экономии памяти
+                    all_messages = all_messages[-100:]
                 
                 game_id_match = re.search(r'#N(\d+)', text)
                 if game_id_match:
@@ -1406,13 +1374,14 @@ def main():
                     schedule_for_game(game_number)
                     check_results()
             
+            # Проверка прогнозов
             if current_time - last_check_time >= CHECK_INTERVAL:
                 check_and_predict()
                 last_check_time = current_time
             
             check_results()
             
-            # 🔥 ПЕРЕОБУЧЕНИЕ ПОСЛЕ КАЖДЫХ 500 НОВЫХ ЗАПИСЕЙ
+            # Переобучение по счётчику новых записей
             if _new_records_since_train >= RETRAIN_THRESHOLD:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
@@ -1421,16 +1390,24 @@ def main():
                     _new_records_since_train = 0
                     gc.collect()
             
-            # Отправка статистики раз в час
+            # Статистика раз в час
             if current_time - last_stats_time > 3600:
                 send_stats_report()
                 last_stats_time = current_time
             
+            # Сборка мусора каждые 30 секунд
+            if current_time - last_gc_time > 30:
+                gc.collect()
+                last_gc_time = current_time
+            
+            # Ограничение размеров списков
             if len(processed_games) > 500:
                 processed_games.clear()
             if len(predictions) > 200:
                 predictions = predictions[-200:]
                 save_history(predictions)
+            if len(all_messages) > 100:
+                all_messages = all_messages[-100:]
             
             time.sleep(CHECK_INTERVAL)
             
