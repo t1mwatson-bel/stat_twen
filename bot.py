@@ -431,7 +431,56 @@ def cache_game_latency(game_id, latency, game_number, timestamp=None):
 
 
 # =====================================================================
-# ФУНКЦИИ API
+# ФУНКЦИИ API - ПОРЯДКОВЫЙ НОМЕР ИГРЫ
+# =====================================================================
+def get_game_number_by_time():
+    """
+    Возвращает порядковый номер игры:
+    - 1 в 03:00
+    - 1440 в 02:59
+    """
+    now = datetime.now(MOSCOW_TZ)
+    
+    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    
+    if now < start:
+        start = start - timedelta(days=1)
+    
+    diff_minutes = (now - start).total_seconds() / 60
+    game_number = int(diff_minutes) % 1440 + 1
+    
+    return game_number
+
+
+def get_game_number_from_timestamp(timestamp):
+    """
+    Получает порядковый номер игры по timestamp начала игры
+    """
+    if not timestamp:
+        return None
+    
+    if isinstance(timestamp, (int, float)):
+        start_time = datetime.fromtimestamp(timestamp, MOSCOW_TZ)
+    else:
+        try:
+            start_time = datetime.fromisoformat(str(timestamp).replace('Z', '+00:00'))
+            start_time = start_time.astimezone(MOSCOW_TZ)
+        except:
+            return None
+    
+    start_day = start_time.replace(hour=3, minute=0, second=0, microsecond=0)
+    
+    if start_time < start_day:
+        start_day = start_day - timedelta(days=1)
+    
+    diff_minutes = (start_time - start_day).total_seconds() / 60
+    game_number = int(diff_minutes) % 1440 + 1
+    
+    return game_number
+
+
+# =====================================================================
+# ФУНКЦИИ API - АКТИВНЫЕ ИГРЫ
 # =====================================================================
 def get_active_games():
     try:
@@ -526,19 +575,6 @@ def parse_cards_and_state(data):
             state = item.get("Value")
 
     return player_cards, dealer_cards, state
-
-
-def get_game_number_by_time():
-    now = datetime.now(MOSCOW_TZ)
-    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
-    
-    if now < start:
-        start = start - timedelta(days=1)
-    
-    diff_minutes = (now - start).total_seconds() / 60
-    game_number = int(diff_minutes) % 1440 + 1
-    
-    return game_number
 
 
 def parse_game_from_text(text):
@@ -639,6 +675,130 @@ def parse_game_from_text(text):
 
 def is_finished_game_text(text):
     return '✅' in text or '🔰' in text
+
+
+# =====================================================================
+# ФУНКЦИИ ДЛЯ БУДУЩИХ ИГР
+# =====================================================================
+def get_upcoming_games():
+    """
+    Получает список будущих игр и вычисляет их порядковые номера
+    """
+    try:
+        url = (f"{BASE_URL}/service-api/main-live-feed/v3/leftMenuSports?"
+               f"fcountry=1&"
+               f"gr=415&"
+               f"lng=ru&"
+               f"ref=7&"
+               f"selectedMs=10.146.1643503")
+        
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"⚠️ API будущих игр вернул код {response.status_code}", flush=True)
+            return []
+        
+        data = response.json()
+        
+        upcoming_games = []
+        now = datetime.now(MOSCOW_TZ)
+        
+        if isinstance(data, list):
+            for section in data:
+                if section.get("menuSectionId") == 10:
+                    sports = section.get("sports", [])
+                    
+                    for sport in sports:
+                        if sport.get("id") == 146:
+                            ligas = sport.get("ligas", [])
+                            
+                            for liga in ligas:
+                                if liga.get("id") == 1643503:
+                                    games = liga.get("games", [])
+                                    
+                                    for game in games:
+                                        if game.get("nonStarted") == True:
+                                            start_ts = game.get("startTs")
+                                            
+                                            if start_ts:
+                                                game_num = get_game_number_from_timestamp(start_ts)
+                                                
+                                                if game_num:
+                                                    start_time = datetime.fromtimestamp(start_ts, MOSCOW_TZ)
+                                                    minutes_until = (start_time - now).total_seconds() / 60
+                                                    
+                                                    if 0 < minutes_until <= 5:
+                                                        game_id = str(game.get("id"))
+                                                        
+                                                        upcoming_games.append({
+                                                            "game_id": game_id,
+                                                            "game_num": game_num,
+                                                            "start_time": start_time,
+                                                            "minutes_until": minutes_until,
+                                                            "start_ts": start_ts,
+                                                            "game": game
+                                                        })
+                                                        
+                                                        print(f"📅 Будущая игра #{game_num} (порядковый), начнётся через {minutes_until:.1f} мин", flush=True)
+        else:
+            print(f"⚠️ Неожиданный формат данных: {type(data)}", flush=True)
+            return []
+        
+        return upcoming_games
+        
+    except Exception as e:
+        print(f"❌ Ошибка получения будущих игр: {e}", flush=True)
+        return []
+
+
+def check_upcoming_games():
+    """
+    Проверяет будущие игры и планирует прогнозы заранее
+    """
+    global predictions
+    
+    upcoming = get_upcoming_games()
+    
+    if not upcoming:
+        return
+    
+    scheduled_count = 0
+    
+    for game in upcoming:
+        game_num = game.get("game_num")
+        game_id = game.get("game_id")
+        minutes_until = game.get("minutes_until", 0)
+        
+        if not game_num:
+            continue
+        
+        target = game_num + OFFSET
+        
+        already_scheduled = False
+        for entry in predictions:
+            if entry.get("target") == target and entry.get("status") in ("scheduled", "pending"):
+                already_scheduled = True
+                break
+        
+        if already_scheduled:
+            continue
+        
+        for entry in predictions:
+            if entry.get("source") == game_num and entry.get("status") in ("scheduled", "pending"):
+                already_scheduled = True
+                break
+        
+        if already_scheduled:
+            continue
+        
+        schedule_for_game(game_num)
+        scheduled_count += 1
+        
+        print(f"📅 ЗАРАНЕЕ запланирован прогноз для игры #{game_num} → #{target} (+{OFFSET})", flush=True)
+        print(f"   ⏰ Игра начнётся через {minutes_until:.1f} минут", flush=True)
+    
+    if scheduled_count > 0:
+        print(f"✅ Запланировано {scheduled_count} прогнозов из будущих игр", flush=True)
 
 
 # =====================================================================
@@ -982,7 +1142,6 @@ def check_results():
     if not predictions or not all_messages:
         return
 
-    # Создаём словарь: номер игры -> текст сообщения
     games_by_number = {}
 
     for msg in all_messages:
@@ -1021,7 +1180,6 @@ def check_results():
         if target is None or not predicted_cards or not message_id:
             continue
 
-        # Проверяем устаревшие прогнозы
         if current_game_number > target + DOGON_GAMES + 5:
             print(f"⏰ Прогноз #{target} устарел, помечаю как просроченный", flush=True)
             
@@ -1193,13 +1351,11 @@ def check_and_predict():
         latency = None
         current_game_data = None
 
-        # Получаем данные текущей игры из API
         active_games = get_active_games()
 
         for game in active_games:
             game_id = str(game.get("id"))
 
-            # Сначала пытаемся получить задержку из кэша
             cached_latency = get_game_latency(game_id, current_num)
             
             data, measured_latency, _, _ = get_game_data(game_id)
@@ -1235,7 +1391,6 @@ def check_and_predict():
                 "state": state
             }
 
-            # Используем кэшированную задержку, если она есть
             if cached_latency is not None:
                 latency = cached_latency
                 print(f"📊 Использую кэшированную задержку: {latency:.1f}мс", flush=True)
@@ -1246,7 +1401,6 @@ def check_and_predict():
 
             break
 
-        # Если задержку не удалось получить
         if latency is None:
             print("⏳ Не удалось получить задержку", flush=True)
             if len(game_history) > 0:
@@ -1265,24 +1419,20 @@ def check_and_predict():
             print(f"⏳ Нет данных API о текущей игре #{current_num}", flush=True)
             continue
 
-        # Получаем прогноз
         predicted_cards, method, confidence = get_prediction(latency, current_game_data)
 
         if not predicted_cards or len(predicted_cards) < 2:
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
 
-        # Обновляем историю игр
         all_cards = current_game_data.get("player_cards", []) + current_game_data.get("dealer_cards", [])
         update_game_history(latency, all_cards, current_num)
 
-        # Формируем и отправляем прогноз
         total_prob = 0
         msg = "🔮 ТОЧНАЯ КАРТА (ML ТОП-2)\n\n"
         msg += f"🎯 Целевая игра: #N{target} (+{OFFSET})\n"
         msg += f"🤖 Метод: ML (увер. {confidence*100:.1f}%)\n"
-        msg += f"⏰ Прогноз: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n"
-        msg += f"📡 Задержка: {latency:.1f}мс\n\n"
+        msg += f"⏰ Прогноз: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n\n"
         msg += "📊 Топ-2 карты:\n"
 
         cards_list = []
@@ -1353,13 +1503,11 @@ def collect_game_data():
         if game_id in finished_games:
             continue
 
-        # ЗАМЕРЯЕМ ЗАДЕРЖКУ ПРИ ПОЯВЛЕНИИ ИГРЫ
         game_data, latency, start_time, end_time = get_game_data(game_id)
 
         if not game_data or not isinstance(game_data, dict):
             continue
 
-        # СОХРАНЯЕМ ЗАДЕРЖКУ В КЭШ
         game_number = get_game_number_by_time()
         
         if latency is not None:
@@ -1416,12 +1564,11 @@ def collect_game_data():
 
             data = save_data(record)
 
-            # Завершённая игра → прогноз на +10
             if state in ["4", "5"]:
                 finished_games.add(game_id)
 
                 print(f"🏁 Игра {game_id} завершена (state={state}), сохранена", flush=True)
-                print(f"📥 API: получена игра #{game_number}", flush=True)
+                print(f"📥 API: получена игра #{game_number} (порядковый)", flush=True)
 
                 schedule_for_game(game_number)
 
@@ -1507,7 +1654,6 @@ def main():
 
     predictions = load_history()
     
-    # Очищаем старые pending прогнозы при старте
     expired_count = 0
     current_num = get_game_number_by_time()
     for entry in predictions:
@@ -1522,7 +1668,6 @@ def main():
         print(f"⏰ Очищено {expired_count} устаревших прогнозов при старте", flush=True)
         save_history(predictions)
 
-    # Загружаем кэш задержек
     load_latency_cache()
 
     load_ml_model()
@@ -1532,7 +1677,6 @@ def main():
 
     send_startup_message()
 
-    # Загружаем сообщения из ОБОИХ каналов при старте
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
         params = {"limit": 100}
@@ -1553,7 +1697,6 @@ def main():
 
         print(f"📥 Загружено сообщений с результатами: {len(all_messages)}", flush=True)
         
-        # Проверяем результаты сразу после загрузки
         check_results()
 
     except Exception as e:
@@ -1562,6 +1705,7 @@ def main():
     last_stats_time = time.time()
     last_train_time = time.time()
     last_check_time = time.time()
+    last_upcoming_check = time.time()
 
     offset = get_offset()
 
@@ -1572,12 +1716,12 @@ def main():
         try:
             current_time = time.time()
 
-            # СБОР ДАННЫХ ИЗ API
             collect_game_data()
 
-            # ============================================================
-            # ПОЛУЧАЕМ ОБНОВЛЕНИЯ ИЗ TELEGRAM
-            # ============================================================
+            if current_time - last_upcoming_check > 30:
+                check_upcoming_games()
+                last_upcoming_check = current_time
+
             updates = get_updates(offset)
 
             for update in updates.get("result", []):
@@ -1593,29 +1737,23 @@ def main():
 
                 text = post.get("text", "")
                 
-                # ========================================================
-                # СОХРАНЯЕМ ВСЕ ЗАВЕРШЁННЫЕ ИГРЫ С #N
-                # ИЗ ЛЮБОГО КАНАЛА (И STATS, И PROGNOZ)
-                # ========================================================
                 if "#N" in text and is_finished_game_text(text):
                     all_messages.append((text, time.time()))
                     
-                    print(f"📩 Получен результат игры: #{re.search(r'#N(\d+)', text).group(1) if re.search(r'#N(\d+)', text) else '?'}", flush=True)
+                    match = re.search(r'#N(\d+)', text)
+                    if match:
+                        game_num = match.group(1)
+                        print(f"📩 Получен результат игры #{game_num}", flush=True)
 
                     if len(all_messages) > 500:
                         all_messages = all_messages[-500:]
 
-            # ============================================================
-            # ПРОВЕРЯЕМ РЕЗУЛЬТАТЫ КАЖДЫЙ ЦИКЛ
-            # ============================================================
             check_results()
 
-            # ПРОВЕРКА ПРОГНОЗОВ
             if current_time - last_check_time >= CHECK_INTERVAL:
                 check_and_predict()
                 last_check_time = current_time
 
-            # ПЕРЕОБУЧЕНИЕ КАЖДЫЕ 3 МИНУТЫ
             if current_time - last_train_time > 180:
                 data_count = len(load_data())
                 if data_count >= MIN_TRAIN_SAMPLES:
@@ -1624,7 +1762,6 @@ def main():
                     last_train_time = current_time
                     gc.collect()
 
-            # СТАТИСТИКА КАЖДЫЙ ЧАС
             if current_time - last_stats_time > 3600:
                 send_stats_report()
                 last_stats_time = current_time
