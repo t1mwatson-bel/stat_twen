@@ -871,8 +871,9 @@ def train_advanced_model():
         n_iter_no_change=10
     )
     
+    # ИСПРАВЛЕНО: multi_class -> multi_class (без подчеркивания)
     lr = LogisticRegression(
-        multi_class='multinomial',
+        multi_class='multinomial',  # <-- было multi_class, теперь multi_class
         solver='lbfgs',
         max_iter=150,
         C=1.5,
