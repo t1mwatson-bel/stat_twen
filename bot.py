@@ -7,7 +7,7 @@ import subprocess
 import importlib
 
 # =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (ВЫПОЛНЯЕТСЯ ДО ВСЕХ ОСТАЛЬНЫХ ИМПОРТОВ)
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
 # =====================================================================
 REQUIRED_PACKAGES = [
     'numpy',
@@ -59,7 +59,7 @@ if not check_and_install_dependencies():
     sys.exit(1)
 
 # =====================================================================
-# ТЕПЕРЬ МОЖНО ИМПОРТИРОВАТЬ ВСЕ ОСТАЛЬНЫЕ БИБЛИОТЕКИ
+# ИМПОРТЫ
 # =====================================================================
 import requests
 import json
@@ -75,15 +75,10 @@ import gc
 warnings.filterwarnings('ignore')
 
 # =====================================================================
-# МЛ-БИБЛИОТЕКИ
+# ML-БИБЛИОТЕКИ
 # =====================================================================
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
-from sklearn.neural_network import MLPClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-import scipy.stats as stats
 
 ML_AVAILABLE = True
 print("✅ Все ML-библиотеки загружены!", flush=True)
@@ -179,7 +174,6 @@ finished_games = set()
 all_messages = []
 predictions = []
 
-# ML-переменные
 error_patterns = []
 scaler = StandardScaler()
 feature_importance = None
@@ -227,7 +221,7 @@ def send_startup_message():
     now = datetime.now(MOSCOW_TZ)
     
     msg = f"""
-🃏 ТОЧНАЯ КАРТА (ML АНСАМБЛЬ)
+🃏 ТОЧНАЯ КАРТА (ML RANDOM FOREST)
 📊 Собрано игр: {data_count}/{MAX_RECORDS}
 🧠 ML: {'✅ АКТИВНА' if ml_initialized else '⏳ ОЖИДАЕТ'}
 🎯 Смещение: +{OFFSET} игр
@@ -613,7 +607,7 @@ def get_history_features():
     return features
 
 # =====================================================================
-# РАСШИРЕННЫЕ ML-ФУНКЦИИ
+# ML-ФУНКЦИИ
 # =====================================================================
 def extract_features_from_game(game_data, latency, game_num):
     if not game_data:
@@ -797,7 +791,7 @@ def analyze_errors_and_improve():
             json.dump(error_patterns, f, indent=2)
 
 # =====================================================================
-# ОБУЧЕНИЕ МОДЕЛИ
+# ОБУЧЕНИЕ МОДЕЛИ (ТОЛЬКО RANDOM FOREST)
 # =====================================================================
 def train_advanced_model():
     global ml_model, ml_initialized, feature_importance, scaler
@@ -811,7 +805,7 @@ def train_advanced_model():
     y = []
     feature_names = None
     
-    print(f"🧠 ML: расширенное обучение на {len(data)} играх...", flush=True)
+    print(f"🧠 ML: обучение на {len(data)} играх...", flush=True)
     
     for game in data:
         all_cards = game.get("player_cards", []) + game.get("dealer_cards", [])
@@ -848,58 +842,29 @@ def train_advanced_model():
     # Нормализуем
     X_scaled = scaler.fit_transform(X)
     
-    print(f"🧠 ML: обучение ансамбля на {len(X)} примерах...", flush=True)
+    print(f"🧠 ML: обучение RandomForest на {len(X)} примерах...", flush=True)
     
-    # Ансамбль из 3 моделей
-    rf = RandomForestClassifier(
-        n_estimators=80,
-        max_depth=6,
-        min_samples_split=4,
-        min_samples_leaf=2,
+    # RandomForest - надёжно и без ошибок
+    model = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=8,
+        min_samples_split=3,
+        min_samples_leaf=1,
         random_state=42,
         n_jobs=1,
         class_weight='balanced'
     )
     
-    mlp = MLPClassifier(
-        hidden_layer_sizes=(30, 15),
-        activation='relu',
-        learning_rate='adaptive',
-        max_iter=200,
-        random_state=42,
-        early_stopping=True,
-        n_iter_no_change=10
-    )
+    model.fit(X_scaled, y)
     
-    # ИСПРАВЛЕНО: multi_class -> multi_class (без подчеркивания)
-    lr = LogisticRegression(
-        multi_class='multinomial',  # <-- было multi_class, теперь multi_class
-        solver='lbfgs',
-        max_iter=150,
-        C=1.5,
-        random_state=42
-    )
-    
-    ensemble = VotingClassifier(
-        estimators=[
-            ('rf', rf),
-            ('mlp', mlp),
-            ('lr', lr)
-        ],
-        voting='soft',
-        weights=[2, 1, 1]
-    )
-    
-    ensemble.fit(X_scaled, y)
-    
-    ml_model = ensemble
-    feature_importance = rf.feature_importances_
+    ml_model = model
+    feature_importance = model.feature_importances_
     ml_initialized = True
     
     try:
         with open(ML_MODEL_FILE, 'wb') as f:
             pickle.dump({
-                'model': ensemble,
+                'model': model,
                 'scaler': scaler,
                 'feature_count': len(X[0]),
                 'train_samples': len(X),
@@ -907,7 +872,7 @@ def train_advanced_model():
                 'feature_names': feature_names,
                 'feature_importance': feature_importance.tolist()
             }, f)
-        print(f"✅ Ансамбль сохранён! Обучено на {len(X)} примерах", flush=True)
+        print(f"✅ Модель сохранена! Обучено на {len(X)} примерах", flush=True)
     except Exception as e:
         print(f"⚠️ Ошибка сохранения: {e}", flush=True)
         return False
@@ -1008,7 +973,7 @@ def predict_advanced(features):
             stats["high_confidence"] += 1
             top_cards = top_cards[:1]
         
-        return top_cards, "ensemble", confidence
+        return top_cards, "random_forest", confidence
         
     except Exception as e:
         print(f"⚠️ Ошибка ML-прогноза: {e}", flush=True)
@@ -1053,7 +1018,7 @@ def check_results():
         target = entry.get("target")
         predicted_cards = entry.get("cards", [])
         message_id = entry.get("message_id")
-        method = entry.get("method", "ensemble")
+        method = entry.get("method", "random_forest")
         original_text = entry.get("original_text", "")
         confidence = entry.get("confidence", 0)
 
@@ -1297,7 +1262,7 @@ def check_and_predict():
             msg = f"🔮 ТОЧНАЯ КАРТА (ML ТОП-2)\n\n"
         
         msg += f"🎯 Целевая игра: #N{target} (+{OFFSET})\n"
-        msg += f"🤖 Метод: Ансамбль (увер. {confidence*100:.1f}%)\n"
+        msg += f"🤖 Метод: Random Forest (увер. {confidence*100:.1f}%)\n"
         msg += f"⏰ Прогноз: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')}\n\n"
         msg += f"📊 {'Топ-1' if is_top1 else 'Топ-2'} карта:\n"
         
@@ -1413,7 +1378,7 @@ def send_stats_report():
     data_count = len(load_data())
     
     msg = f"""
-📊 СТАТИСТИКА (ML АНСАМБЛЬ + ОБУЧЕНИЕ НА ОШИБКАХ)
+📊 СТАТИСТИКА (ML RANDOM FOREST + ОБУЧЕНИЕ НА ОШИБКАХ)
 ⏰ {now.strftime('%d.%m.%Y %H:%M:%S')}
 ══════════════════════════════════════════
 📊 Собрано игр: {data_count}/{MAX_RECORDS}
@@ -1440,7 +1405,7 @@ def send_stats_report():
         msg += "  (пока нет данных)\n"
     
     if ml_initialized:
-        msg += "\n🤖 ML: АКТИВНА (ансамбль 3 моделей)"
+        msg += "\n🤖 ML: АКТИВНА (Random Forest)"
         msg += f"\n🧠 Обучение на ошибках: {'ВКЛ' if error_patterns else 'ОЖИДАЕТ'}"
     else:
         msg += f"\n🤖 ML: ОЖИДАЕТ ({data_count}/{MIN_TRAIN_SAMPLES})"
@@ -1454,7 +1419,7 @@ def main():
     global predictions, all_messages, stats, game_history, collection_active
     global _new_records_since_train, ml_initialized
     
-    print("🔄 ТОЧНАЯ КАРТА (ML АНСАМБЛЬ + ОБУЧЕНИЕ НА ОШИБКАХ)", flush=True)
+    print("🔄 ТОЧНАЯ КАРТА (ML RANDOM FOREST + ОБУЧЕНИЕ НА ОШИБКАХ)", flush=True)
     print("=" * 60, flush=True)
     print(f"📁 Данные: {DATA_FILE}", flush=True)
     print(f"📊 Максимум записей: {MAX_RECORDS}", flush=True)
