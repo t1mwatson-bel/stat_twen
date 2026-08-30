@@ -415,7 +415,14 @@ def get_game_latency(game_id, game_number=None):
 
 
 def cache_game_latency(game_id, latency, game_number, timestamp=None):
+    """
+    Сохраняет задержку ТОЛЬКО если её ещё нет в кэше (ПЕРВАЯ задержка)
+    """
     global game_latency_cache
+    
+    # Проверяем: если задержка уже есть - ничего не делаем
+    if game_id in game_latency_cache:
+        return False
     
     if timestamp is None:
         timestamp = datetime.now(MOSCOW_TZ).isoformat()
@@ -427,7 +434,8 @@ def cache_game_latency(game_id, latency, game_number, timestamp=None):
     }
     
     save_latency_cache()
-    print(f"📊 Сохранена задержка {latency:.1f}мс для игры #{game_number}", flush=True)
+    print(f"📊 Сохранена ПЕРВАЯ задержка {latency:.1f}мс для игры #{game_number}", flush=True)
+    return True
 
 
 # =====================================================================
@@ -753,8 +761,10 @@ def get_upcoming_games():
 
 def check_upcoming_games():
     """
-    Проверяет будущие игры, замеряет задержку и сразу даёт прогноз
+    Проверяет будущие игры, замеряет ПЕРВУЮ задержку и СРАЗУ даёт прогноз
     """
+    global predictions
+    
     upcoming = get_upcoming_games()
     
     if not upcoming:
@@ -778,15 +788,19 @@ def check_upcoming_games():
         if already_predicted:
             continue
         
-        print(f"🔥 Игра #{game_num} появилась в лобби! Замеряю задержку...", flush=True)
+        print(f"🔥 Игра #{game_num} появилась в лобби! Замеряю ПЕРВУЮ задержку...", flush=True)
         
         # Замеряем задержку
         data, measured_latency, _, _ = get_game_data(game_id)
         
         if measured_latency is not None:
-            latency = measured_latency
-            cache_game_latency(game_id, latency, game_num)
-            print(f"📊 Замерена задержка: {latency:.1f}мс", flush=True)
+            # Сохраняем только если ещё нет в кэше
+            if game_id not in game_latency_cache:
+                latency = measured_latency
+                cache_game_latency(game_id, latency, game_num)
+            else:
+                latency = game_latency_cache[game_id].get("latency")
+                print(f"📊 Использую сохранённую задержку: {latency:.1f}мс", flush=True)
         else:
             latency = 500
             print(f"📊 Использую задержку по умолчанию: {latency}мс", flush=True)
@@ -820,11 +834,11 @@ def check_upcoming_games():
                 "state": state
             }
         
-        # ✅ ДЕЛАЕМ ПРОГНОЗ СРАЗУ НА ОСНОВЕ ЗАДЕРЖКИ
+        # СРАЗУ ДЕЛАЕМ ПРОГНОЗ (НЕ ЖДЁМ НАЧАЛА ИГРЫ)
         if current_game_data:
             predicted_cards, method, confidence = get_prediction(latency, current_game_data)
         else:
-            # Если нет данных, делаем прогноз только по задержке
+            # Если нет карт - прогноз только по задержке
             features = {
                 "latency": latency,
                 "game_num": game_num % 100,
@@ -864,7 +878,7 @@ def check_upcoming_games():
         msg += f"📈 Догон: {DOGON_GAMES - 1} игр\n"
         msg += "📍 Ищем: любую позицию (игрок/дилер)"
         
-        # Отправляем прогноз
+        # СРАЗУ ОТПРАВЛЯЕМ ПРОГНОЗ
         message_id = send_message(CHANNEL_PROGNOZ, msg)
         
         if message_id:
@@ -1421,8 +1435,10 @@ def collect_game_data():
 
         game_number = get_game_number_by_time()
         
+        # Сохраняем ТОЛЬКО ПЕРВУЮ задержку
         if latency is not None:
-            cache_game_latency(game_id, latency, game_number)
+            if game_id not in game_latency_cache:
+                cache_game_latency(game_id, latency, game_number)
 
         player_cards, dealer_cards, state = parse_cards_and_state(game_data)
 
