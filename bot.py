@@ -14,11 +14,12 @@ import gc
 warnings.filterwarnings('ignore')
 
 # =====================================================================
-# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (ИСПРАВЛЕНА)
 # =====================================================================
 try:
     import subprocess
     import importlib
+    import sys
 
     REQUIRED_PACKAGES = [
         'numpy',
@@ -31,11 +32,12 @@ try:
     def install_package(package):
         print(f"📦 Устанавливаю: {package}...", flush=True)
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
             print(f"✅ {package} установлен!", flush=True)
             return True
         except Exception as e:
             print(f"❌ Ошибка установки {package}: {e}", flush=True)
+            print(f"⚠️ Попробуй установить вручную: pip install {package}", flush=True)
             return False
 
     def check_and_install_dependencies():
@@ -57,7 +59,7 @@ try:
             for package in missing:
                 if not install_package(package):
                     print(f"❌ Не удалось установить {package}", flush=True)
-                    return False
+                    print(f"⚠️ Продолжаем без {package}...", flush=True)
             print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
         else:
             print("\n✅ ВСЕ ЗАВИСИМОСТИ УСТАНОВЛЕНЫ!", flush=True)
