@@ -1,3 +1,7 @@
 requests
 pytz
 python-dotenv
+numpy
+scikit-learn
+requests
+pytz
