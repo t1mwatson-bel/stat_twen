@@ -4,14 +4,44 @@ import requests
 import json
 import re
 import time
-import pickle
-import numpy as np
 from datetime import datetime, timedelta
 import pytz
 from collections import deque, defaultdict
 import warnings
-import gc
 warnings.filterwarnings('ignore')
+
+# =====================================================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ (ДО ВСЕХ ОСТАЛЬНЫХ ИМПОРТОВ!)
+# =====================================================================
+def install_and_import(package):
+    try:
+        __import__(package.replace('-', '_'))
+        print(f"✅ {package} уже установлен")
+        return True
+    except ImportError:
+        print(f"📦 Устанавливаю {package}...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            print(f"✅ {package} установлен!")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка установки {package}: {e}")
+            return False
+
+# Устанавливаем зависимости ДО импорта
+import subprocess
+REQUIRED_PACKAGES = ['numpy', 'catboost', 'scikit-learn', 'pytz']
+for pkg in REQUIRED_PACKAGES:
+    if not install_and_import(pkg):
+        print(f"⚠️ Не удалось установить {pkg}, бот может работать некорректно")
+
+# =====================================================================
+# ТЕПЕРЬ МОЖНО ИМПОРТИРОВАТЬ ВСЁ ОСТАЛЬНОЕ
+# =====================================================================
+import numpy as np
+import pickle
+from catboost import CatBoostClassifier
+import gc
 
 # =====================================================================
 # АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
