@@ -536,7 +536,7 @@ def get_history_features():
     return features
 
 # =====================================================================
-# ML-ФУНКЦИИ (CATBOOST ЗАМЕНЁН НА RANDOM FOREST)
+# ML-ФУНКЦИИ (CATBOOST -> RANDOM FOREST)
 # =====================================================================
 def extract_features_from_game(game_data, latency, game_num):
     if not game_data:
@@ -612,9 +612,6 @@ def extract_features_from_game(game_data, latency, game_num):
     
     return features
 
-# =====================================================================
-# ОБУЧЕНИЕ НА RANDOM FOREST
-# =====================================================================
 def train_ml_model():
     global ml_model, ml_initialized
     
@@ -917,12 +914,12 @@ def schedule_for_game(game_number):
     print(f"📅 Запланирован прогноз: #{source} → #{target} (+{OFFSET})", flush=True)
 
 # =====================================================================
-# НОВОЕ ПРАВИЛО: ПРОВЕРКА НАЛИЧИЯ КАРТЫ В ТЕКУЩЕЙ ИГРЕ
+# НОВОЕ ПРАВИЛО: ПРОВЕРКА КАРТЫ В ТЕКУЩЕЙ ИГРЕ
 # =====================================================================
 def is_predicted_card_in_current_game(predicted_cards, current_game_data):
     """
     Проверяет, есть ли прогнозируемая карта среди первых двух карт игрока и дилера.
-    Возвращает True, если карта найдена (прогноз блокируется).
+    Если есть – возвращает True (прогноз блокируется).
     """
     if not predicted_cards or not current_game_data:
         return False
@@ -992,9 +989,7 @@ def check_and_predict():
             print(f"⏭️ Нет прогноза от ML для #{target}", flush=True)
             continue
         
-        # ============================================================
         # НОВОЕ ПРАВИЛО: если карта уже есть в текущей игре – пропускаем
-        # ============================================================
         if is_predicted_card_in_current_game(predicted_cards, current_game_data):
             predicted_card_str = ", ".join(predicted_cards)
             print(f"⏭️ Прогнозируемая карта ({predicted_card_str}) уже есть в текущей игре #{current_num} → пропускаю прогноз для #{target}", flush=True)
