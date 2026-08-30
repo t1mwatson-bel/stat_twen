@@ -110,7 +110,7 @@ if not BOT_TOKEN or not CHANNEL_STATS or not CHANNEL_PROGNOZ:
 # НАСТРОЙКИ
 # =====================================================================
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-BASE_URL = "https://1xlite-36553.pro"
+BASE_URL = "https://1xlite-0687.pro"
 
 DATA_FILE = "cards_data.json"
 HISTORY_FILE = "cards_history.json"
@@ -316,7 +316,7 @@ def save_offset(offset):
 # =====================================================================
 def get_active_games():
     try:
-        url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2?cfView=3&count=40&fcountry=190&gr=415&grMode=4&lng=ru&ref=7&selectedMs=10.146.1643503"
+        url = f"{BASE_URL}/service-api/main-live-feed/v3/games1x2?cfView=3&count=40&fcountry=190&gr=415&grMode=4&lng=ru&ref=7&selectedMs=1.146.1643503,10.146.1643503"
         response = requests.get(url, headers=HEADERS, timeout=10)
         
         if response.status_code == 200:
