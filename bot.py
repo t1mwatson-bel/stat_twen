@@ -2319,7 +2319,7 @@ def check_upcoming_games():
 
                 "source": game_num,
 
-                "target": game_num,
+                "target": game_num + 10,
 
                 "cards": cards_list,
 
