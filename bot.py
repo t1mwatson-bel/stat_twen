@@ -194,21 +194,11 @@ MAX_SIMILAR_GAMES = 300
 # КАРТЫ
 # =====================================================================
 
-# =====================================================================
-# ЦЕЛИ ДЛЯ ОБУЧЕНИЯ
-# =====================================================================
-
-# Ранги (от 2 до A)
-TARGET_RANKS = ["J", "Q", "K", "A"]
-
-# Масти
-TARGET_SUITS = ["♠️", "♣️", "♦️", "♥️"]
-
-# Для обратной совместимости (полный список карт)
 TARGET_CARDS = [
-    rank + suit
-    for rank in TARGET_RANKS
-    for suit in TARGET_SUITS
+    "J♠️", "J♣️", "J♦️", "J♥️",
+    "Q♠️", "Q♣️", "Q♦️", "Q♥️",
+    "K♠️", "K♣️", "K♦️", "K♥️",
+    "A♠️", "A♣️", "A♦️", "A♥️"
 ]
 
 SUITS = ["♠️", "♣️", "♦️", "♥️"]
@@ -1310,43 +1300,32 @@ def extract_prematch_features(
 # =====================================================================
 
 def get_target_cards_from_record(record):
-    """Возвращает список карт из записи (для обучения)"""
+
     cards = []
+
     all_cards = (
-        record.get("player_cards", [])
+        record.get(
+            "player_cards",
+            []
+        )
         +
-        record.get("dealer_cards", [])
+        record.get(
+            "dealer_cards",
+            []
+        )
     )
+
     for card in all_cards:
+
         rank = card.get("rank", "")
         suit = card.get("suit", "")
+
         card_str = rank + suit
+
         if card_str in TARGET_CARDS:
             cards.append(card_str)
+
     return list(set(cards))
-
-
-def get_rank_and_suits_from_record(record):
-    """
-    Возвращает:
-    - список рангов (для обучения модели рангов)
-    - список мастей (для обучения модели мастей)
-    """
-    ranks = []
-    suits = []
-    all_cards = (
-        record.get("player_cards", [])
-        +
-        record.get("dealer_cards", [])
-    )
-    for card in all_cards:
-        rank = card.get("rank", "")
-        suit = card.get("suit", "")
-        if rank in TARGET_RANKS:
-            ranks.append(rank)
-        if suit in TARGET_SUITS:
-            suits.append(suit)
-    return list(set(ranks)), list(set(suits))
 
 
 # =====================================================================
@@ -1709,7 +1688,9 @@ def build_training_features(
 # =====================================================================
 
 def train_ml_model():
-    global ml_model, ml_initialized, ml_rank_model, ml_suit_model
+
+    global ml_model
+    global ml_initialized
 
     if not ML_AVAILABLE:
         return False
@@ -1717,131 +1698,141 @@ def train_ml_model():
     data = load_data()
 
     if len(data) < MIN_TRAIN_SAMPLES:
+
         print(
             f"⚠️ ML недостаточно игр: "
             f"{len(data)}/{MIN_TRAIN_SAMPLES}",
             flush=True
         )
+
         return False
 
     X = []
-    y_ranks = []
-    y_suits = []
+    y = []
+
     feature_names = None
 
     print(
-        f"🧠 ML: обучение на {len(data)} исторических играх...",
+        f"🧠 ML: обучение на "
+        f"{len(data)} исторических играх...",
         flush=True
     )
 
     for record in data:
-        features = build_training_features(record)
+
+        features = build_training_features(
+            record
+        )
 
         if not features:
             continue
 
-        ranks, suits = get_rank_and_suits_from_record(record)
+        cards = get_target_cards_from_record(
+            record
+        )
 
-        if not ranks and not suits:
+        if not cards:
             continue
 
         if feature_names is None:
-            feature_names = sorted(features.keys())
+
+            feature_names = sorted(
+                features.keys()
+            )
 
         feature_vector = [
             features[key]
             for key in feature_names
         ]
 
-        # Каждый пример добавляем в оба набора
-        if ranks:
-            for rank in ranks:
-                if rank not in TARGET_RANKS:
-                    continue
-                X.append(feature_vector)
-                y_ranks.append(TARGET_RANKS.index(rank))
-                # Для мастей — берём первую попавшуюся масть из этой игры
-                if suits:
-                    y_suits.append(TARGET_SUITS.index(suits[0]))
-                else:
-                    y_suits.append(0)  # заглушка
+        # Каждая целевая карта становится
+        # отдельным обучающим примером
+        for card in cards:
 
-        # Если рангов нет, но есть масти
-        elif suits:
-            for suit in suits:
-                X.append(feature_vector)
-                y_ranks.append(0)  # заглушка
-                y_suits.append(TARGET_SUITS.index(suit))
+            if card not in TARGET_CARDS:
+                continue
+
+            X.append(feature_vector)
+
+            y.append(
+                TARGET_CARDS.index(card)
+            )
 
     if len(X) < MIN_TRAIN_SAMPLES:
+
         print(
-            f"⚠️ ML недостаточно примеров: {len(X)}",
+            f"⚠️ ML недостаточно примеров: "
+            f"{len(X)}",
             flush=True
         )
+
         return False
 
     X = np.array(X)
-    y_ranks = np.array(y_ranks)
-    y_suits = np.array(y_suits)
+    y = np.array(y)
 
     print(
-        f"🧠 ML обучается на {len(X)} примерах",
+        f"🧠 ML обучается на {len(X)} "
+        f"примерах",
         flush=True
     )
 
-    # =============================================================
-    # МОДЕЛЬ ДЛЯ РАНГОВ
-    # =============================================================
-    rank_model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=10,
+    model = RandomForestClassifier(
+
+        n_estimators=300,
+
+        max_depth=12,
+
         min_samples_leaf=3,
+
         random_state=42,
+
         n_jobs=1,
+
         class_weight="balanced_subsample"
     )
-    rank_model.fit(X, y_ranks)
 
-    # =============================================================
-    # МОДЕЛЬ ДЛЯ МАСТЕЙ
-    # =============================================================
-    suit_model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=10,
-        min_samples_leaf=3,
-        random_state=42,
-        n_jobs=1,
-        class_weight="balanced_subsample"
-    )
-    suit_model.fit(X, y_suits)
+    model.fit(X, y)
 
-    ml_model = {
-        "rank": rank_model,
-        "suit": suit_model
-    }
+    ml_model = model
     ml_initialized = True
 
     try:
-        with open(ML_MODEL_FILE, "wb") as f:
+
+        with open(
+            ML_MODEL_FILE,
+            "wb"
+        ) as f:
+
             pickle.dump({
-                "rank_model": rank_model,
-                "suit_model": suit_model,
-                "feature_names": feature_names,
+
+                "model": model,
+
+                "feature_names": (
+                    feature_names
+                ),
+
                 "train_samples": len(X),
+
                 "total_games": len(data)
+
             }, f)
 
         print(
-            f"✅ ML обучена на {len(X)} примерах",
+            f"✅ ML обучена "
+            f"на {len(X)} примерах",
             flush=True
         )
+
         return True
 
     except Exception as e:
+
         print(
             f"⚠️ Ошибка сохранения ML: {e}",
             flush=True
         )
+
         return False
 
 
@@ -1896,75 +1887,75 @@ def load_ml_model():
 # ML ПРОГНОЗ
 # =====================================================================
 
-def predict_ml(latency, game_num):
+def predict_ml(
+    latency,
+    game_num
+):
+
     if not ml_initialized or ml_model is None:
+
         return None, {}
 
     try:
-        features = extract_prematch_features(latency, game_num)
+
+        features = extract_prematch_features(
+            latency,
+            game_num
+        )
+
         vector = np.array([[
             features[key]
-            for key in sorted(features.keys())
+            for key in sorted(
+                features.keys()
+            )
         ]])
 
-        rank_model = ml_model["rank"]
-        suit_model = ml_model["suit"]
-
-        # =========================================================
-        # ПРОГНОЗ РАНГА
-        # =========================================================
-        raw_rank_probs = rank_model.predict_proba(vector)[0]
-        rank_probs = {}
-        for class_index, probability in zip(rank_model.classes_, raw_rank_probs):
-            if 0 <= int(class_index) < len(TARGET_RANKS):
-                rank = TARGET_RANKS[int(class_index)]
-                rank_probs[rank] = float(probability)
-
-        sorted_ranks = sorted(rank_probs.items(), key=lambda x: x[1], reverse=True)
-        top_rank = sorted_ranks[0][0]
-        top_rank_prob = sorted_ranks[0][1]
-
-        # =========================================================
-        # ПРОГНОЗ МАСТЕЙ
-        # =========================================================
-        raw_suit_probs = suit_model.predict_proba(vector)[0]
-        suit_probs = {}
-        for class_index, probability in zip(suit_model.classes_, raw_suit_probs):
-            if 0 <= int(class_index) < len(TARGET_SUITS):
-                suit = TARGET_SUITS[int(class_index)]
-                suit_probs[suit] = float(probability)
-
-        sorted_suits = sorted(suit_probs.items(), key=lambda x: x[1], reverse=True)
-        top_suits = [suit for suit, _ in sorted_suits[:2]]
-
-        # =========================================================
-        # ФОРМИРУЕМ ПРОГНОЗ (РАНГ + 2 МАСТИ)
-        # =========================================================
-        predicted_cards = [
-            (top_rank + suit, top_rank_prob)
-            for suit in top_suits
-        ]
-
-        print(
-            f"\n📊 ПРОГНОЗ РАНГА: {top_rank} ({top_rank_prob * 100:.2f}%)",
-            flush=True
-        )
-        print(
-            f"📊 ПРОГНОЗ МАСТЕЙ: {', '.join(top_suits)}",
-            flush=True
-        )
-        print(
-            f"🎯 ИТОГОВЫЙ ПРОГНОЗ: {predicted_cards[0][0]} и {predicted_cards[1][0]}",
-            flush=True
+        raw_probs = (
+            ml_model.predict_proba(
+                vector
+            )[0]
         )
 
-        return predicted_cards, rank_probs
+        # Важно:
+        # classes_ может содержать не все 16 карт
+        class_probabilities = {}
+
+        for class_index, probability in zip(
+            ml_model.classes_,
+            raw_probs
+        ):
+
+            if (
+                0 <= int(class_index)
+                < len(TARGET_CARDS)
+            ):
+
+                card = TARGET_CARDS[
+                    int(class_index)
+                ]
+
+                class_probabilities[card] = (
+                    float(probability)
+                )
+
+        sorted_cards = sorted(
+            class_probabilities.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return (
+            sorted_cards[:2],
+            class_probabilities
+        )
 
     except Exception as e:
+
         print(
             f"⚠️ Ошибка ML прогноза: {e}",
             flush=True
         )
+
         return None, {}
 
 
@@ -2129,7 +2120,7 @@ def get_prediction(
 
 
 # =====================================================================
-# ПРОВЕРКА БУДУЩИХ ИГР
+# ПРОВЕРКА БУДУЩИХ ИГР (ИСПРАВЛЕНА)
 # =====================================================================
 
 def check_upcoming_games():
@@ -2149,25 +2140,20 @@ def check_upcoming_games():
         if not game_num or not game_id:
             continue
 
-        # Уже прогнозировали?
+        # ============================================================
+        # 🔥 ПРОВЕРКА: ЕСТЬ ЛИ УЖЕ ПРОГНОЗ НА ЭТУ ИГРУ?
+        # ============================================================
         already_predicted = False
-
         for entry in predictions:
-
             if (
                 entry.get("target") == game_num
-                and entry.get("status")
-                in (
-                    "pending",
-                    "win",
-                    "lose"
-                )
+                and entry.get("status") in ("pending", "win", "lose")
             ):
-
                 already_predicted = True
                 break
 
         if already_predicted:
+            print(f"⏭️ Прогноз на #{game_num} уже существует", flush=True)
             continue
 
         print(
@@ -2326,9 +2312,9 @@ def check_upcoming_games():
 
             entry = {
 
-                "source": game_num + 10,
+                "source": game_num,
 
-                "target": game_num + 10,
+                "target": game_num,
 
                 "cards": cards_list,
 
