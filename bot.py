@@ -58,15 +58,13 @@ MIN_TRAIN_SAMPLES = 50
 
 ML_CONFIDENCE_THRESHOLD = 0.20
 
-# Вес источников
+# Эти веса оставлены для аналитики Combined,
+# но прогноз публикуется ТОЛЬКО при согласии ML + Pattern
 ML_WEIGHT = 0.85
 PATTERN_WEIGHT = 0.15
 
-# Минимальная сила Pattern для отдельного прогноза.
-# Pattern score после нормализации должен быть выше этого значения.
 PATTERN_SIGNAL_THRESHOLD = 0.05
 
-# Как часто публиковать аналитику
 ANALYTICS_INTERVAL = 3600
 
 
@@ -551,9 +549,6 @@ def extract_player_suits(record):
 
 
 def parse_suits_from_text(text):
-    """
-    Берём только PLAYER-группу после #N...
-    """
 
     if not text:
         return []
@@ -567,7 +562,7 @@ def parse_suits_from_text(text):
 
         match = re.search(
             r"#N\d+\.\s*"
-            r"(?:[✅❌🔮]\s*)?"
+            r"(?:[✅❌🔮🔰]\s*)?"
             r"\d+\(([^)]*)\)",
             clean
         )
@@ -609,7 +604,7 @@ def parse_full_cards_from_text(text):
 
         match = re.search(
             r"#N\d+\.\s*"
-            r"(?:[✅❌🔮]\s*)?"
+            r"(?:[✅❌🔮🔰]\s*)?"
             r"\d+\(([^)]*)\)",
             clean
         )
@@ -1164,11 +1159,6 @@ def scanner_scores_for_target(
     data,
     target_record
 ):
-    """
-    Возвращает:
-    - вероятности Pattern по мастям
-    - количество реально активированных паттернов
-    """
 
     if (
         not scanner_patterns
@@ -1221,7 +1211,6 @@ def scanner_scores_for_target(
 
         active_patterns += 1
 
-        # Реальный вес паттерна
         weight = (
             max(
                 0.0,
@@ -1244,7 +1233,6 @@ def scanner_scores_for_target(
             pattern["suit"]
         ] += value
 
-    # Нет ни одного активного паттерна
     if active_patterns == 0:
 
         return (
@@ -1270,7 +1258,6 @@ def scanner_scores_for_target(
 
             raw_probs[suit] = 0.0
 
-    # Нормализуем Pattern значения
     max_value = max(
         raw_probs.values()
     )
@@ -1643,16 +1630,6 @@ def get_model_prediction(
     timestamp_msk,
     target_record=None
 ):
-    """
-    Полный анализ:
-
-    ML
-    Pattern (только если реально есть сигнал)
-    Combined
-
-    Если Pattern нет:
-    Combined = ML
-    """
 
     data = load_data()
 
@@ -1697,7 +1674,7 @@ def get_model_prediction(
             "combined_probability": 0.0,
             "combined_probs": {},
 
-            "agreement": None,
+            "agreement": False,
             "ml_confidence": 0.0,
         }
 
@@ -1745,7 +1722,6 @@ def get_model_prediction(
             )
         )
 
-        # Pattern существует только при реальном сигнале
         if (
             candidate_probability
             >= PATTERN_SIGNAL_THRESHOLD
@@ -1758,7 +1734,7 @@ def get_model_prediction(
             has_pattern_signal = True
 
     # -------------------------------------------------------------
-    # COMBINED
+    # COMBINED / AGREEMENT
     # -------------------------------------------------------------
 
     combined_probs = {}
@@ -1781,37 +1757,39 @@ def get_model_prediction(
                 )
             )
 
-        combined_suit = max(
-            combined_probs,
-            key=combined_probs.get
-        )
-
-        combined_probability = (
-            combined_probs[
-                combined_suit
-            ]
-        )
-
         agreement = (
-            ml_suit
-            == pattern_suit
+            ml_suit == pattern_suit
         )
+
+        # =========================================================
+        # ГЛАВНАЯ ЛОГИКА:
+        # ПРОГНОЗ ЕСТЬ ТОЛЬКО ПРИ СОГЛАСИИ ML + PATTERN
+        # =========================================================
+
+        if agreement:
+
+            combined_suit = ml_suit
+
+            combined_probability = (
+                (
+                    ml_probability
+                    + pattern_probability
+                )
+                / 2
+            )
+
+        else:
+
+            combined_suit = None
+            combined_probability = 0.0
 
     else:
 
-        # Если Pattern сигнала нет —
-        # Combined полностью повторяет ML
-        combined_probs = dict(
-            ml_probs
-        )
-
-        combined_suit = ml_suit
-
-        combined_probability = (
-            ml_probability
-        )
-
-        agreement = None
+        # Без Pattern сигнала прогноз НЕ публикуется
+        agreement = False
+        combined_suit = None
+        combined_probability = 0.0
+        combined_probs = {}
 
     # -------------------------------------------------------------
     # ML THRESHOLD
@@ -1823,6 +1801,7 @@ def get_model_prediction(
     ):
 
         combined_suit = None
+        combined_probability = 0.0
 
     return {
         "ml_suit": ml_suit,
@@ -2021,15 +2000,6 @@ def build_analysis_text(
         0.0
     )
 
-    combined_suit = result.get(
-        "combined_suit"
-    )
-
-    combined_probability = result.get(
-        "combined_probability",
-        0.0
-    )
-
     active_patterns = result.get(
         "active_patterns",
         0
@@ -2040,41 +2010,12 @@ def build_analysis_text(
     )
 
     text = (
-        f"🔮 <b>#{target_num} АНАЛИЗ</b>\n\n"
-
-        f"🤖 ML: <b>{ml_suit}</b> — "
-        f"<b>{ml_probability * 100:.1f}%</b>\n"
+        f"🔮 #{target_num} АНАЛИЗ | "
+        f"ML={ml_suit} ({ml_probability * 100:.1f}%) | "
+        f"Pattern={pattern_suit} ({pattern_probability * 100:.1f}%) | "
+        f"Patterns={active_patterns} | "
+        f"Agreement={'ДА' if agreement else 'НЕТ'}"
     )
-
-    # -------------------------------------------------------------
-    # Pattern выводится ТОЛЬКО если реально есть прогноз
-    # -------------------------------------------------------------
-
-    if pattern_suit:
-
-        text += (
-            f"🔎 Pattern: <b>{pattern_suit}</b> — "
-            f"<b>{pattern_probability * 100:.1f}%</b>\n"
-        )
-
-    text += (
-        f"⚖️ Combined: <b>{combined_suit}</b> — "
-        f"<b>{combined_probability * 100:.1f}%</b>"
-    )
-
-    # -------------------------------------------------------------
-    # Эти строки тоже только при Pattern
-    # -------------------------------------------------------------
-
-    if pattern_suit:
-
-        text += (
-            f"\n\n🧩 Активных паттернов: "
-            f"<b>{active_patterns}</b>\n"
-
-            f"🤝 Согласие: "
-            f"<b>{'ДА' if agreement else 'НЕТ'}</b>"
-        )
 
     return text
 
@@ -2137,75 +2078,72 @@ def check_upcoming_games():
             target_meta
         )
 
-        combined_suit = result.get(
-            "combined_suit"
+        ml_suit = result.get(
+            "ml_suit"
         )
 
-        if not combined_suit:
+        pattern_suit = result.get(
+            "pattern_suit"
+        )
+
+        agreement = result.get(
+            "agreement"
+        )
+
+        # =========================================================
+        # СТРОГИЙ ФИЛЬТР
+        #
+        # Прогноз создаём ТОЛЬКО:
+        # 1. ML есть
+        # 2. Pattern есть
+        # 3. Масти полностью совпадают
+        # 4. agreement == True
+        # =========================================================
+
+        if (
+            not ml_suit
+            or not pattern_suit
+            or not agreement
+            or ml_suit != pattern_suit
+        ):
 
             print(
-                f"⏭️ Нет прогноза "
-                f"для #{target_num}",
+                f"⏭️ #{target_num} ПРОПУСК | "
+                f"ML={ml_suit} | "
+                f"Pattern={pattern_suit} | "
+                f"Согласие={'ДА' if agreement else 'НЕТ'}",
                 flush=True
             )
 
             continue
 
-        # ---------------------------------------------------------
-        # CONSOLE ANALYSIS
-        # ---------------------------------------------------------
-
-        console_text = build_analysis_text(
-            target_num,
-            result
-        )
+        # При согласии используем общую масть
+        predicted_suit = ml_suit
 
         print(
             "\n"
-            + "=" * 50
+            + "=" * 60
             + "\n"
-            + re.sub(
-                r"<[^>]+>",
-                "",
-                console_text
+            + "🔥 СОГЛАСИЕ ML + PATTERN\n"
+            + build_analysis_text(
+                target_num,
+                result
             )
             + "\n"
-            + "=" * 50,
+            + f"🎯 СИГНАЛ: #{target_num}: {predicted_suit}"
+            + "\n"
+            + "=" * 60,
             flush=True
         )
 
-        # ---------------------------------------------------------
-        # TELEGRAM FORECAST
-        # ---------------------------------------------------------
+        # =========================================================
+        # КОРОТКОЕ TELEGRAM СООБЩЕНИЕ
+        # =========================================================
 
         msg = (
-            "🔮 <b>ПРОГНОЗ МАСТИ "
-            "(БАККАРА)</b>\n\n"
-
-            f"🎯 Игра: <b>#N{target_num}</b>\n"
-
-            f"⏰ Время: {timestamp}\n\n"
-
-            f"⚖️ <b>Прогноз:</b> "
-            f"<b>{combined_suit}</b>\n"
-
-            f"📊 Вероятность: "
-            f"<b>{result.get('combined_probability', 0.0) * 100:.1f}%</b>\n\n"
-
-            f"📈 Проверка: "
-            f"0–{DOGON_GAMES - 1} догон"
+            f"🎯 Игра: <b>#N{target_num}</b>: "
+            f"<b>{predicted_suit}</b>"
         )
-
-        # Если Pattern есть — добавляем анализ
-        if result.get("pattern_suit"):
-
-            msg += (
-                "\n\n────────────────\n\n"
-                + build_analysis_text(
-                    target_num,
-                    result
-                )
-            )
 
         msg_id = send_message(
             CHANNEL_PROGNOZ,
@@ -2229,10 +2167,7 @@ def check_upcoming_games():
 
             "timestamp_msk": timestamp,
 
-            # -----------------------------------------------------
             # ML
-            # -----------------------------------------------------
-
             "ml_suit":
                 result.get("ml_suit"),
 
@@ -2248,10 +2183,7 @@ def check_upcoming_games():
                     {}
                 ),
 
-            # -----------------------------------------------------
             # PATTERN
-            # -----------------------------------------------------
-
             "pattern_suit":
                 result.get(
                     "pattern_suit"
@@ -2275,14 +2207,9 @@ def check_upcoming_games():
                     0
                 ),
 
-            # -----------------------------------------------------
-            # COMBINED
-            # -----------------------------------------------------
-
+            # Combined
             "combined_suit":
-                result.get(
-                    "combined_suit"
-                ),
+                predicted_suit,
 
             "combined_probability":
                 result.get(
@@ -2296,10 +2223,7 @@ def check_upcoming_games():
                     {}
                 ),
 
-            "agreement":
-                result.get(
-                    "agreement"
-                ),
+            "agreement": True,
 
             "ml_confidence":
                 result.get(
@@ -2311,15 +2235,9 @@ def check_upcoming_games():
                 now.isoformat(),
         }
 
-        # Совместимость со старой историей
-        entry["model_suit"] = (
-            entry["combined_suit"]
-        )
-
-        entry["main_suit"] = (
-            entry["combined_suit"]
-        )
-
+        # Совместимость
+        entry["model_suit"] = predicted_suit
+        entry["main_suit"] = predicted_suit
         entry["additional_suit"] = None
 
         predictions.append(
@@ -2331,10 +2249,10 @@ def check_upcoming_games():
         )
 
         print(
-            f"💾 Прогноз #{target_num} сохранён | "
+            f"🔥 ПРОГНОЗ #{target_num} СОХРАНЁН | "
             f"ML={entry['ml_suit']} | "
             f"Pattern={entry['pattern_suit']} | "
-            f"Combined={entry['combined_suit']}",
+            f"МАСТЬ={predicted_suit}",
             flush=True
         )
 
@@ -2541,7 +2459,7 @@ def check_results():
             continue
 
         # ---------------------------------------------------------
-        # Проверяем наличие всех игр
+        # ЖДЁМ ВСЕ 4 ИГРЫ ДЛЯ ПРОВЕРКИ ДОГОНА
         # ---------------------------------------------------------
 
         all_available = True
@@ -2592,7 +2510,7 @@ def check_results():
             )
 
         # ---------------------------------------------------------
-        # COMBINED
+        # MAIN RESULT
         # ---------------------------------------------------------
 
         combined_result = source_hit_in_games(
@@ -2655,9 +2573,9 @@ def check_results():
             else:
                 stats["agreement"]["different"] += 1
 
-        # ---------------------------------------------------------
-        # MAIN WIN
-        # ---------------------------------------------------------
+        # =========================================================
+        # WIN
+        # =========================================================
 
         if (
             combined_result
@@ -2679,40 +2597,18 @@ def check_results():
                 combined_suit
             ] += 1
 
+            # -----------------------------------------------------
+            # КОРОТКОЕ СООБЩЕНИЕ + ✅
+            # -----------------------------------------------------
+
             result_text = (
-                "\n\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "✅ <b>ЗАШЛО</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-
-                f"🎯 Игра: "
-                f"#{combined_result['game']}\n"
-
-                f"📈 Догон: "
-                f"<b>{dogon}</b>\n"
-
-                f"🃏 Масть игрока: "
-                f"<b>{combined_suit}</b>\n\n"
-
-                f"🤖 ML: "
-                f"{'✅' if ml_result and ml_result['hit'] else '❌'}"
-            )
-
-            if pattern_suit:
-
-                result_text += (
-                    f"\n🔎 Pattern: "
-                    f"{'✅' if pattern_result and pattern_result['hit'] else '❌'}"
-                )
-
-            result_text += (
-                "\n⚖️ Combined: "
-                "<b>✅ ЗАШЛО</b>"
+                f"🎯 Игра: <b>#N{target}</b>: "
+                f"<b>{combined_suit}✅</b>"
             )
 
             edit_message(
                 msg_id,
-                original + result_text
+                result_text
             )
 
             entry.update(
@@ -2767,46 +2663,35 @@ def check_results():
                     result_game_text
                 )
 
+            print(
+                f"✅ ЗАШЛО | "
+                f"#{target} | "
+                f"{combined_suit} | "
+                f"догон {dogon}",
+                flush=True
+            )
+
             continue
 
-        # ---------------------------------------------------------
+        # =========================================================
         # LOSE
-        # ---------------------------------------------------------
+        # =========================================================
 
         stats["total"] += 1
         stats["lose"] += 1
 
+        # ---------------------------------------------------------
+        # КОРОТКОЕ СООБЩЕНИЕ + ❌
+        # ---------------------------------------------------------
+
         result_text = (
-            "\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "❌ <b>НЕ ЗАШЛО</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-
-            f"🎯 Цель: "
-            f"#{target}\n\n"
-
-            f"🤖 ML: "
-            f"{'✅' if ml_result and ml_result['hit'] else '❌'}"
-        )
-
-        if pattern_suit:
-
-            result_text += (
-                f"\n🔎 Pattern: "
-                f"{'✅' if pattern_result and pattern_result['hit'] else '❌'}"
-            )
-
-        result_text += (
-            "\n⚖️ Combined: "
-            "<b>❌ НЕ ЗАШЛО</b>\n\n"
-
-            f"📈 Проверено: "
-            f"0–{DOGON_GAMES - 1} догон"
+            f"🎯 Игра: <b>#N{target}</b>: "
+            f"<b>{combined_suit}❌</b>"
         )
 
         edit_message(
             msg_id,
-            original + result_text
+            result_text
         )
 
         entry.update(
@@ -2833,6 +2718,13 @@ def check_results():
 
         save_history(
             predictions
+        )
+
+        print(
+            f"❌ НЕ ЗАШЛО | "
+            f"#{target} | "
+            f"{combined_suit}",
+            flush=True
         )
 
 
@@ -2907,10 +2799,9 @@ def build_hourly_analytics():
     sources = {
         "ML": ml_accuracy,
         "PATTERN": pattern_accuracy,
-        "COMBINED": combined_accuracy,
+        "СОГЛАСИЕ": combined_accuracy,
     }
 
-    # Pattern без прогнозов не участвует
     if stats["pattern"]["total"] == 0:
         sources.pop(
             "PATTERN",
@@ -2964,7 +2855,7 @@ def build_hourly_analytics():
 
     text += (
         "\n"
-        "⚖️ <b>COMBINED</b>\n"
+        "🔥 <b>СОГЛАСИЕ ML + PATTERN</b>\n"
         f"{make_bar(combined_accuracy)} "
         f"{combined_accuracy:.1f}%\n"
 
@@ -2990,7 +2881,7 @@ def build_hourly_analytics():
 
         "────────────────\n"
 
-        f"📈 Всего Combined: "
+        f"📈 Всего сигналов: "
         f"<b>{stats['combined']['total']}</b>\n"
 
         f"✅ Зашло: "
@@ -3020,7 +2911,6 @@ def maybe_send_analytics():
     ):
         return
 
-    # Не отправляем пустую аналитику
     if stats["combined"]["total"] <= 0:
         return
 
@@ -3109,11 +2999,12 @@ def process_updates(
         if not match:
             continue
 
+        # Принимаем игры с любым из маркеров результата
         if not any(
             marker in text
             for marker in (
                 "✅",
-                "🔮",
+                "❌",
                 "🔰"
             )
         ):
@@ -3128,7 +3019,7 @@ def process_updates(
             text
         )
 
-        # Сохраняем все игры
+        # Сохраняем все реальные игры
         add_game_to_cards_data(
             num,
             text
@@ -3172,9 +3063,6 @@ def rebuild_stats_from_history():
 
     global stats
 
-    # Не пересчитываем pending
-    # Восстанавливаем только завершённые прогнозы
-
     for entry in predictions:
 
         status = entry.get(
@@ -3187,7 +3075,7 @@ def rebuild_stats_from_history():
         ):
             continue
 
-        # Combined
+        # Combined / Agreement signals
         combined_hit = entry.get(
             "combined_hit"
         )
@@ -3246,11 +3134,32 @@ def rebuild_stats_from_history():
 
                 stats["agreement"]["different"] += 1
 
+        # Основная статистика
+        if combined_hit is not None:
+
+            stats["total"] += 1
+
+            if combined_hit:
+                stats["win"] += 1
+
+                dogon = entry.get("dogon")
+
+                if dogon in stats["by_dogon"]:
+                    stats["by_dogon"][dogon] += 1
+
+                suit = entry.get("combined_suit")
+
+                if suit:
+                    stats["suit_hits"][suit] += 1
+
+            else:
+                stats["lose"] += 1
+
     print(
         f"📊 Статистика восстановлена | "
         f"ML={stats['ml']['total']} | "
         f"Pattern={stats['pattern']['total']} | "
-        f"Combined={stats['combined']['total']}",
+        f"Согласие={stats['combined']['total']}",
         flush=True
     )
 
@@ -3274,14 +3183,17 @@ def main():
     )
 
     print(
-        "🤖 ML + 🔎 PATTERN + ⚖️ COMBINED",
+        "🔥 ТОЛЬКО СОГЛАСИЕ ML + PATTERN",
         flush=True
     )
 
     print(
-        f"⚖️ Вес Combined: "
-        f"ML {ML_WEIGHT * 100:.0f}% / "
-        f"Pattern {PATTERN_WEIGHT * 100:.0f}%",
+        "📌 ML и Pattern должны выбрать одинаковую масть",
+        flush=True
+    )
+
+    print(
+        f"📈 Проверка: 0–{DOGON_GAMES - 1} догон",
         flush=True
     )
 
@@ -3384,8 +3296,12 @@ def main():
     )
 
     print(
-        "📊 Аналитика: "
-        "ML / Pattern / Combined",
+        "🔥 Сигналы только при полном согласии ML + Pattern",
+        flush=True
+    )
+
+    print(
+        "📩 Формат: 🎯 Игра: #NXXX: ♦️",
         flush=True
     )
 
