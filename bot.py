@@ -3114,7 +3114,7 @@ def process_updates(
             for marker in (
                 "✅",
                 "❌",
-                "🔮"
+                "🔰"
             )
         ):
             continue
