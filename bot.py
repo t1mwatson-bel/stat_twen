@@ -3113,7 +3113,7 @@ def process_updates(
             marker in text
             for marker in (
                 "✅",
-                "❌",
+                "🔮",
                 "🔰"
             )
         ):
