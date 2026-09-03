@@ -1379,264 +1379,129 @@ def cache_result(
 
 def check_predictions():
     """
-    Проверка строго ПОСЛЕДОВАТЕЛЬНО:
-
-        догон 0 = target_number
-
-        если 0 проиграл:
-        догон 1 = target + 1
-
-        если 1 проиграл:
-        догон 2 = target + 2
-
-        ...
-
-    ВАЖНО:
-
-    Если результата текущей игры ещё нет
-    в CHANNEL_STATS — функция НИЧЕГО
-    не делает и НЕ переходит дальше.
+    Проверка прогнозов — бот САМ ходит в канал статистики
+    и ищет результат нужной игры.
     """
+    global predictions
+
+    if not CHANNEL_STATS:
+        print("❌ CHANNEL_STATS не задан", flush=True)
+        return
 
     changed = False
 
     for entry in predictions:
-
         if entry.get("status") != "pending":
             continue
 
-        target = entry.get(
-            "target_number"
-        )
-
+        target = entry.get("target_number")
         predicted_cards = [
-            card
-            for card in entry.get(
-                "predicted_cards",
-                []
-            )
-            if card
+            card for card in entry.get("predicted_cards", []) if card
         ]
 
-        # Совместимость со старыми прогнозами.
-        if (
-            not predicted_cards
-            and entry.get("predicted_card")
-        ):
-            predicted_cards = [
-                entry["predicted_card"]
-            ]
-
-        if (
-            not target
-            or not predicted_cards
-        ):
+        if not target or not predicted_cards:
             continue
 
-        # ----------------------------------------------------
-        # ТЕКУЩИЙ ДОГОН
-        # ----------------------------------------------------
-
-        current_dogon = int(
-            entry.get(
-                "current_dogon",
-                0
-            )
-        )
-
+        current_dogon = int(entry.get("current_dogon", 0))
         if current_dogon < 0:
             current_dogon = 0
-
         if current_dogon > DOGON_GAMES:
             current_dogon = DOGON_GAMES
 
-        game_num = add_game_offset(
-            target,
-            current_dogon
-        )
+        game_num = add_game_offset(target, current_dogon)
+
+        print(f"🔎 Проверяю #{game_num} в канале статистики...", flush=True)
 
         # ----------------------------------------------------
-        # ЖДЁМ ИМЕННО ЭТУ ИГРУ В CHANNEL_STATS
+        # САМ ИДЕМ В КАНАЛ ЗА ПОСЛЕДНИМИ СООБЩЕНИЯМИ
         # ----------------------------------------------------
-
-        text = games_cache.get(
-            game_num
-        )
-
-        if not text:
-
-            print(
-                f"⏳ Ожидание CHANNEL_STATS: "
-                f"#{game_num} | "
-                f"догон {current_dogon}",
-                flush=True
+        try:
+            response = SESSION.get(
+                f"{TELEGRAM_API}/getChatHistory",
+                params={
+                    "chat_id": CHANNEL_STATS,
+                    "limit": 30  # Берем последние 30 сообщений
+                },
+                timeout=10
             )
-
-            # НЕ ПЕРЕХОДИМ К СЛЕДУЮЩЕМУ
-            # ДОГОНУ, ПОКА НЕТ РЕЗУЛЬТАТА.
-            continue
-
-        parsed = parse_cards_from_message(
-            text
-        )
-
-        if not parsed:
-            print(
-                f"⚠️ Не удалось разобрать "
-                f"результат #{game_num}",
-                flush=True
-            )
-            continue
-
-        cards = parsed.get(
-            "cards",
-            []
-        )
-
-        print(
-            f"🔎 Проверка #{game_num}: "
-            f"ДОГОН={current_dogon} | "
-            f"прогноз={predicted_cards} | "
-            f"выпало={cards}",
-            flush=True
-        )
-
-        # ----------------------------------------------------
-        # ПРОВЕРЯЕМ TOP-2
-        # ----------------------------------------------------
-
-        found_card = next(
-            (
-                card
-                for card in predicted_cards
-                if card in cards
-            ),
-            None
-        )
-
-        # ----------------------------------------------------
-        # ПОПАДАНИЕ
-        # ----------------------------------------------------
-
-        if found_card:
-
-            entry["status"] = "win"
-
-            entry["result_game"] = (
-                game_num
-            )
-
-            entry["found_card"] = (
-                found_card
-            )
-
-            entry["current_dogon"] = (
-                current_dogon
-            )
-
-            changed = True
-
-            print(
-                f"✅ ЗАШЛО "
-                f"на #{game_num} | "
-                f"догон {current_dogon} | "
-                f"карта {found_card}",
-                flush=True
-            )
-
-            if entry.get("message_id"):
-
-                telegram_edit(
-                    entry["message_id"],
-                    make_result_message(
-                        entry,
-                        "win",
-                        found_card,
-                        game_num
+            
+            data = response.json()
+            
+            if not data.get("ok"):
+                print(f"⚠️ Не удалось получить историю: {data}", flush=True)
+                continue
+                
+            messages = data.get("result", [])
+            
+            found = False
+            
+            for msg in messages:
+                text = msg.get("text", "")
+                
+                parsed = parse_cards_from_message(text)
+                if not parsed:
+                    continue
+                    
+                if parsed["game_number"] == game_num:
+                    found = True
+                    cards = parsed["cards"]
+                    
+                    print(
+                        f"🔎 Нашел #{game_num}: "
+                        f"прогноз={predicted_cards} | "
+                        f"выпало={cards}",
+                        flush=True
                     )
-                )
-
-            # Прогноз закрыт.
-            continue
-
-        # ----------------------------------------------------
-        # НЕ ПОПАЛО
-        # ----------------------------------------------------
-
-        print(
-            f"❌ Не зашло на #{game_num} | "
-            f"догон {current_dogon}",
-            flush=True
-        )
-
-        # ----------------------------------------------------
-        # ЕСЛИ ЭТО БЫЛ ПОСЛЕДНИЙ ДОГОН
-        # ----------------------------------------------------
-
-        if current_dogon >= DOGON_GAMES:
-
-            entry["status"] = "lose"
-
-            entry["result_game"] = (
-                game_num
-            )
-
-            changed = True
-
-            print(
-                f"❌ НЕ ЗАШЛО: "
-                f"исчерпаны догон 0-"
-                f"{DOGON_GAMES}",
-                flush=True
-            )
-
-            if entry.get("message_id"):
-
-                telegram_edit(
-                    entry["message_id"],
-                    make_result_message(
-                        entry,
-                        "lose"
+                    
+                    # Проверяем попадание
+                    found_card = next(
+                        (card for card in predicted_cards if card in cards),
+                        None
                     )
-                )
-
-            continue
-
-        # ----------------------------------------------------
-        # ПЕРЕХОД НА СЛЕДУЮЩИЙ ДОГОН
-        #
-        # Это происходит ТОЛЬКО после того,
-        # как результат текущей игры уже найден
-        # в CHANNEL_STATS.
-        # ----------------------------------------------------
-
-        next_dogon = (
-            current_dogon + 1
-        )
-
-        entry["current_dogon"] = (
-            next_dogon
-        )
-
-        changed = True
-
-        next_game_num = add_game_offset(
-            target,
-            next_dogon
-        )
-
-        print(
-            f"➡️ Переход на "
-            f"ДОГОН {next_dogon} | "
-            f"ожидаем #{next_game_num}",
-            flush=True
-        )
+                    
+                    if found_card:
+                        entry["status"] = "win"
+                        entry["result_game"] = game_num
+                        entry["found_card"] = found_card
+                        entry["current_dogon"] = current_dogon
+                        changed = True
+                        
+                        print(f"✅ ЗАШЛО на #{game_num} | карта {found_card}", flush=True)
+                        
+                        if entry.get("message_id"):
+                            telegram_edit(
+                                entry["message_id"],
+                                make_result_message(entry, "win", found_card, game_num)
+                            )
+                        break
+                    else:
+                        # Не зашло — переходим на следующий догон
+                        if current_dogon >= DOGON_GAMES:
+                            entry["status"] = "lose"
+                            entry["result_game"] = game_num
+                            changed = True
+                            print(f"❌ НЕ ЗАШЛО: исчерпаны все догоны", flush=True)
+                            
+                            if entry.get("message_id"):
+                                telegram_edit(
+                                    entry["message_id"],
+                                    make_result_message(entry, "lose")
+                                )
+                        else:
+                            next_dogon = current_dogon + 1
+                            entry["current_dogon"] = next_dogon
+                            changed = True
+                            print(f"➡️ Переход на ДОГОН {next_dogon}", flush=True)
+                        break
+            
+            if not found:
+                print(f"⏳ Игра #{game_num} еще не появилась в канале", flush=True)
+                
+        except Exception as e:
+            print(f"❌ Ошибка при запросе к каналу: {e}", flush=True)
 
     if changed:
-        save_json(
-            PREDICTIONS_FILE,
-            predictions
-        )
+        save_json(PREDICTIONS_FILE, predictions)
 
 
 # ============================================================
