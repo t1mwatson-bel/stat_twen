@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BOT_TOKEN_PROGNOZ")
 CHANNEL_PROGNOZ = os.getenv("CHAT_ID_21") or os.getenv("CHANNEL_PROGNOZ")
-CHANNEL_STATS = "-1003477065559"  # Жестко задан канал статистики
+CHANNEL_ID = "-1003477065559"  # Жестко задан канал статистики
 
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN не задан", flush=True)
@@ -1134,7 +1134,7 @@ def check_predictions():
 
 def process_updates(offset):
     """Читает канал статистики и заполняет games_cache"""
-    if not CHANNEL_STATS:
+    if not CHANNEL_ID:
         return offset
 
     try:
@@ -1164,7 +1164,7 @@ def process_updates(offset):
                 continue
 
             chat_id = str(post.get("chat", {}).get("id", ""))
-            if chat_id != str(CHANNEL_STATS):
+            if chat_id != str(CHANNEL_ID):
                 continue
 
             text = post.get("text", "")
@@ -1175,7 +1175,7 @@ def process_updates(offset):
 
             games_cache[parsed["game_number"]] = text
             print(
-                f"💾 CHANNEL_STATS -> #{parsed['game_number']} | "
+                f"💾 CHANNEL_ID -> #{parsed['game_number']} | "
                 f"карты={parsed['cards']}",
                 flush=True
             )
@@ -1513,7 +1513,7 @@ def main():
     print("🃏 Режим: TOP-2", flush=True)
     print(f"📈 Догон: 0 → {DOGON_GAMES}", flush=True)
     print("📡 Прогноз: на КАЖДУЮ Lobby", flush=True)
-    print("📊 Проверка: CHANNEL_STATS", flush=True)
+    print("📊 Проверка: CHANNEL_ID", flush=True)
     print("==================================================\n", flush=True)
 
     while True:
