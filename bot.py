@@ -568,7 +568,7 @@ def build_prediction(game_id, timestamp_msk):
     }
 
 
-def prediction_passes_filter(result):
+def prediction_passes(result):
 
     if not result:
         return False
@@ -583,23 +583,15 @@ def prediction_passes_filter(result):
         0.0
     )
 
-    supporters = result.get(
-        "supporters",
-        []
-    )
-
-    # TOP-1 должен быть минимум 17%
     if probability < MIN_FORECAST_PROBABILITY:
 
         print(
-            f"🚫 TOP-1 слабый: "
-            f"{probability:.1%}",
+            f"🚫 TOP-1 слабый: {probability:.1%}",
             flush=True
         )
 
         return False
 
-    # TOP-2 должен существовать
     if not result.get("second_card"):
 
         print(
