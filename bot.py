@@ -179,25 +179,20 @@ def load_history():
     print(f"📂 Ищу файл истории: {os.path.abspath(DATA_FILE)}", flush=True)
     print(f"📂 Файл существует: {os.path.exists(DATA_FILE)}", flush=True)
 
-    data = load_json_file(DATA_FILE, [])
+    data = load_json(DATA_FILE, [])
 
     if not isinstance(data, list):
         print("⚠️ JSON имеет неверный формат!", flush=True)
-        data = []
+        return []
 
-    clean = []
-
-    for g in data:
-        if isinstance(g, dict) and g.get("game_id"):
-            clean.append(g)
+    clean = [
+        x for x in data
+        if isinstance(x, dict) and x.get("game_id")
+    ]
 
     print(f"📊 Загружено игр из файла: {len(clean)}", flush=True)
 
-    if len(clean) > MAX_HISTORY_GAMES:
-        clean = clean[-MAX_HISTORY_GAMES:]
-        atomic_save_json(DATA_FILE, clean)
-
-    return clean
+    return clean[-MAX_HISTORY_GAMES:]
 
 
 # ============================================================
