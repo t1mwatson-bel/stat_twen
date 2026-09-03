@@ -1325,31 +1325,39 @@ def parse_cards_from_message(text):
     if not text:
         return None
 
-    match = re.search(
-        r"#N(\d+)",
-        text
-    )
-
+    # Ищем номер игры
+    match = re.search(r"#N(\d+)", text)
     if not match:
         return None
 
-    game_number = int(
-        match.group(1)
-    )
+    game_number = int(match.group(1))
 
-    found = re.findall(
-        r"(10|[2-9AJQK])([♠♣♦♥])",
-        text
-    )
+    # Ищем ВСЕ карты в формате: 6♦️, K♥️, J♣️, 10♦️ и т.д.
+    # Теперь ищем ВЕЗДЕ, не только после #N
+    found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", text)
+    
+    # Если не нашли с emoji, пробуем без
+    if not found:
+        found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])", text)
 
     cards = [
         f"{rank}{suit}\ufe0f"
         for rank, suit in found
     ]
 
+    # Если карт нет - пробуем найти в скобках
+    if not cards:
+        # Ищем все что в скобках: (6♦️K♥️A♣️)
+        matches = re.findall(r"\((.*?)\)", text)
+        for match in matches:
+            # Ищем карты внутри скобок
+            found_inner = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", match)
+            for rank, suit in found_inner:
+                cards.append(f"{rank}{suit}\ufe0f")
+
     return {
         "game_number": game_number,
-        "cards": cards,
+        "cards": list(dict.fromkeys(cards))  # Убираем дубли
     }
 
 
