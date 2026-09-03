@@ -807,23 +807,42 @@ def prediction_exists(game_id):
     return any(str(x.get("target_game_id")) == game_id for x in predictions)
 
 
-def create_prediction(game_id, game_number):
+def create_hybrid_prediction(game_id, game_number):
+
     global last_prediction_time
 
     game_id = str(game_id)
 
-    if prediction_exists(game_id) or has_pending_prediction():
+    if prediction_exists(game_id):
+        return None
+
+    if has_pending_prediction():
+        print("⏳ Есть активный прогноз", flush=True)
         return None
 
     now_ts = time.time()
+
     if now_ts - last_prediction_time < PREDICTION_COOLDOWN_SECONDS:
         return None
 
-    timestamp = datetime.now(MOSCOW_TZ).strftime("%H:%M:%S.%f")[:-3]
+    now = datetime.now(MOSCOW_TZ)
 
-    print("\n══════════════════════════════════", flush=True)
-    print(f"🧠 HYBRID + SCANNER | ID={game_id}", flush=True)
-    print(f"⏱ Timestamp={timestamp}", flush=True)
+    timestamp_msk = now.strftime("%H:%M:%S.%f")[:-3]
+
+    print(
+        f"🧠 HYBRID + SCANNER | ID={game_id}",
+        flush=True
+    )
+
+    print(
+        f"⏱ Timestamp={timestamp_msk}",
+        flush=True
+    )
+
+    result = build_hybrid_prediction(
+        game_id,
+        timestamp_msk
+    )
 
     result = build_prediction(game_id, timestamp)
     if not result:
