@@ -62,8 +62,8 @@ MIN_ID1_MATCHES = 3
 MIN_ID2_MATCHES = 2
 MIN_PATTERN_MATCHES = 3
 
-MIN_FORECAST_PROBABILITY = 0.29
-MIN_LEADER_GAP = 0.04
+MIN_FORECAST_PROBABILITY = 0.17
+MIN_LEADER_GAP = 0.00
 MIN_ACTIVE_METHODS = 2
 
 PATTERN_LENGTHS = (2, 3, 4, 5)
@@ -568,17 +568,53 @@ def build_prediction(game_id, timestamp_msk):
     }
 
 
-def prediction_passes(result):
+def prediction_passes_filter(result):
+
     if not result:
         return False
 
-    if result["probability"] < MIN_FORECAST_PROBABILITY:
-        print(f"🚫 Лидер слабый: {result['probability']:.1%}", flush=True)
+    probability = result.get(
+        "probability",
+        0.0
+    )
+
+    second_probability = result.get(
+        "second_probability",
+        0.0
+    )
+
+    supporters = result.get(
+        "supporters",
+        []
+    )
+
+    # TOP-1 должен быть минимум 17%
+    if probability < MIN_FORECAST_PROBABILITY:
+
+        print(
+            f"🚫 TOP-1 слабый: "
+            f"{probability:.1%}",
+            flush=True
+        )
+
         return False
 
-    if result["gap"] < MIN_LEADER_GAP:
-        print(f"🚫 Нет преимущества: gap={result['gap']:.1%}", flush=True)
+    # TOP-2 должен существовать
+    if not result.get("second_card"):
+
+        print(
+            "🚫 Нет второй карты",
+            flush=True
+        )
+
         return False
+
+    print(
+        f"✅ TOP-2 ПРОШЁЛ ФИЛЬТР | "
+        f"TOP-1={probability:.1%} | "
+        f"TOP-2={second_probability:.1%}",
+        flush=True
+    )
 
     return True
 
@@ -656,46 +692,91 @@ def telegram_edit(message_id, text, chat_id=None):
 # ============================================================
 
 def make_prediction_message(entry):
+
     result = entry["hybrid"]
 
-    text = "🔮 <b>ТОЧНАЯ КАРТА — HYBRID + SCANNER</b>\n\n"
-    text += f"🎯 Игра: <b>#N{entry['target_number']}</b>\n"
-    text += f"🃏 <b>{result['card']}</b> — <b>{result['probability'] * 100:.1f}%</b>\n\n"
-    text += f"🥈 {result.get('second_card') or '—'} — {result.get('second_probability', 0) * 100:.1f}%\n\n"
+    card1 = result["card"]
+    prob1 = result["probability"]
+
+    card2 = result.get(
+        "second_card",
+        "—"
+    )
+
+    prob2 = result.get(
+        "second_probability",
+        0.0
+    )
+
+    text = (
+        "🔮 <b>ТОЧНАЯ КАРТА — HYBRID + SCANNER</b>\n\n"
+    )
+
+    text += (
+        f"🎯 Игра: "
+        f"<b>#N{entry['target_number']}</b>\n\n"
+    )
+
+    text += (
+        "🃏 <b>ПРОГНОЗ TOP-2:</b>\n\n"
+    )
+
+    text += (
+        f"🥇 <b>{card1}</b> — "
+        f"<b>{prob1 * 100:.1f}%</b>\n"
+    )
+
+    text += (
+        f"🥈 <b>{card2}</b> — "
+        f"<b>{prob2 * 100:.1f}%</b>\n\n"
+    )
+
+    text += (
+        f"📊 Прогноз: "
+        f"<b>{card1} / {card2}</b>\n\n"
+    )
+
     text += "🤖 <b>Сигналы:</b>\n"
+
+    details = result.get(
+        "method_details",
+        {}
+    )
 
     names = {
         "MS": "⏱ Миллисекунды",
         "ID1": "🔢 ID ×1",
         "ID2": "🔢 ID ×2",
+        "SEQ": "🧩 Последовательность",
         "FREQ": "📚 Частота",
-        "SCAN": "🔎 Pattern Scanner",
+        "SCANNER": "🔎 Pattern Scanner"
     }
 
-    for key in ("MS", "ID1", "ID2", "FREQ", "SCAN"):
-        info = result.get("method_details", {}).get(key)
-        if not info:
-            continue
+    for key, info in details.items():
 
-        marker = "✅" if info.get("top") == result["card"] else "▫️"
+        top = info.get("top")
+
+        marker = "▫️"
+
+        if top in [card1, card2]:
+            marker = "✅"
+
         text += (
-            f"{marker} {names[key]}: <b>{info.get('top')}</b> "
-            f"({info.get('probability', 0) * 100:.1f}%) "
-            f"[{info.get('matches', 0)}]\n"
+            f"{marker} "
+            f"{names.get(key, key)}: "
+            f"<b>{top}</b> "
+            f"({info.get('probability', 0) * 100:.1f}%)\n"
         )
 
-        if key == "SCAN":
-            patterns = info.get("patterns", [])
-            if patterns:
-                best = max(patterns, key=lambda x: x.get("length", 0))
-                text += (
-                    f"   🧩 Паттерн {best['length']} игр | "
-                    f"совпадений: {best['matches']}\n"
-                )
+    text += (
+        f"\n📊 Методов: "
+        f"{len(result.get('active_methods', []))}"
+    )
 
-    text += f"\n📊 Методов: {len(result.get('active_methods', []))}"
-    text += f"\n🎯 Подтвердили: {', '.join(result.get('supporters', [])) or 'нет'}"
-    text += f"\n📈 Догон: {DOGON_GAMES - 1} игр"
+    text += (
+        f"\n🎯 Догон: "
+        f"{DOGON_GAMES - 1} игр"
+    )
 
     return text
 
@@ -775,18 +856,47 @@ def create_prediction(game_id, game_number):
         return None
 
     entry = {
-        "target_game_id": game_id,
-        "target_number": game_number,
-        "timestamp_msk": timestamp,
-        "hybrid": result,
-        "predicted_card": result["card"],
-        "status": "pending",
-        "created_at": datetime.now(MOSCOW_TZ).isoformat(),
-        "message_id": None,
-        "original_text": "",
-        "result_game": None,
-        "found_card": None,
-    }
+
+    "target_game_id": game_id,
+
+    "target_number":
+        game_number,
+
+    "timestamp_msk":
+        timestamp_msk,
+
+    "hybrid":
+        result,
+
+    # Старая карта для совместимости
+    "predicted_card":
+        result["card"],
+
+    # НОВОЕ — две карты TOP-2
+    "predicted_cards": [
+        result["card"],
+        result["second_card"]
+    ],
+
+    "status":
+        "pending",
+
+    "created_at":
+        datetime.now(MOSCOW_TZ).isoformat(),
+
+    "message_id":
+        None,
+
+    "original_text":
+        "",
+
+    "result_game":
+        None,
+
+    "found_card":
+        None
+
+}
 
     predictions.append(entry)
     save_json(PREDICTIONS_FILE, predictions)
@@ -827,69 +937,154 @@ def cache_result(game_number, text):
 
 
 def check_predictions():
+
     changed = False
 
     for entry in predictions:
+
         if entry.get("status") != "pending":
             continue
 
-        target = entry.get("target_number")
-        predicted = entry.get("predicted_card")
+        target = entry.get(
+            "target_number"
+        )
 
-        if not target or not predicted:
+        # Берём новый список TOP-2
+        predicted_cards = entry.get(
+            "predicted_cards",
+            []
+        )
+
+        # Совместимость со старыми прогнозами
+        if not predicted_cards:
+
+            old_card = entry.get(
+                "predicted_card"
+            )
+
+            if old_card:
+                predicted_cards = [old_card]
+
+        if not target or not predicted_cards:
             continue
 
-        available = 0
-        won = False
+        found = False
+        found_card = None
+        found_game = None
 
-        for dogon in range(DOGON_GAMES):
-            game_num = add_game_offset(target, dogon)
-            text = games_cache.get(game_num)
+        available = 0
+
+        for dogon in range(
+            DOGON_GAMES
+        ):
+
+            game_num = add_game_offset(
+                target,
+                dogon
+            )
+
+            text = games_cache.get(
+                game_num
+            )
 
             if not text:
                 continue
 
             available += 1
-            parsed = parse_cards_from_message(text)
+
+            parsed = parse_cards_from_message(
+                text
+            )
+
             if not parsed:
                 continue
 
-            cards = parsed.get("cards", [])
-            print(f"🔎 Проверка #{game_num}: {cards}", flush=True)
+            actual_cards = parsed.get(
+                "cards",
+                []
+            )
 
-            if predicted in cards:
-                won = True
-                entry["status"] = "win"
-                entry["result_game"] = game_num
-                entry["found_card"] = predicted
-                changed = True
+            print(
+                f"🔎 Проверка #{game_num}: "
+                f"прогноз={predicted_cards} | "
+                f"выпало={actual_cards}",
+                flush=True
+            )
 
-                print(f"✅ ЗАШЛО {predicted} на #{game_num}", flush=True)
+            # WIN если выпала ЛЮБАЯ карта из TOP-2
+            for card in predicted_cards:
 
-                if entry.get("message_id"):
-                    telegram_edit(
-                        entry["message_id"],
-                        make_result_message(entry, "win", predicted, game_num),
-                    )
+                if card in actual_cards:
+
+                    found = True
+                    found_card = card
+                    found_game = game_num
+
+                    break
+
+            if found:
                 break
 
-        if won:
+        if found:
+
+            entry["status"] = "win"
+
+            entry["result_game"] = found_game
+
+            entry["found_card"] = found_card
+
+            changed = True
+
+            print(
+                f"✅ ЗАШЛО! "
+                f"{found_card} "
+                f"на #{found_game} | "
+                f"TOP-2={predicted_cards}",
+                flush=True
+            )
+
+            if entry.get("message_id"):
+
+                telegram_edit(
+                    entry["message_id"],
+                    make_result_text(
+                        entry,
+                        "win",
+                        found_card,
+                        found_game
+                    )
+                )
+
             continue
 
         if available >= DOGON_GAMES:
+
             entry["status"] = "lose"
+
             changed = True
 
-            print(f"❌ НЕ ЗАШЛО: {predicted}", flush=True)
+            print(
+                f"❌ НЕ ЗАШЛО: "
+                f"TOP-2={predicted_cards}",
+                flush=True
+            )
 
             if entry.get("message_id"):
+
                 telegram_edit(
                     entry["message_id"],
-                    make_result_message(entry, "lose"),
+                    make_result_text(
+                        entry,
+                        "lose"
+                    )
                 )
 
     if changed:
-        save_json(PREDICTIONS_FILE, predictions)
+
+        atomic_save_json(
+            PREDICTIONS_FILE,
+            predictions
+        )
 
 
 # ============================================================
