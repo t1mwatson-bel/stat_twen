@@ -1625,4 +1625,969 @@ def check_predictions():
             next_dogon
         )
 
-        print
+        print(
+            f"➡️ Переход на "
+            f"ДОГОН {next_dogon} | "
+            f"ожидаем #{next_game_num}",
+            flush=True
+        )
+
+    if changed:
+        save_json(
+            PREDICTIONS_FILE,
+            predictions
+        )
+
+
+# ============================================================
+# TELEGRAM UPDATES
+# ============================================================
+
+def load_offset():
+    try:
+
+        if os.path.exists(
+            OFFSET_FILE
+        ):
+
+            with open(
+                OFFSET_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                return int(
+                    f.read().strip()
+                )
+
+    except Exception:
+        pass
+
+    return 0
+
+
+def save_offset(offset):
+    try:
+
+        with open(
+            OFFSET_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            f.write(
+                str(offset)
+            )
+
+    except Exception:
+        pass
+
+
+def process_updates(offset):
+    if not CHANNEL_STATS:
+        return offset
+
+    try:
+
+        response = SESSION.get(
+            f"{TELEGRAM_API}/getUpdates",
+            params={
+                "offset": offset,
+                "timeout": 3
+            },
+            timeout=10,
+        )
+
+        data = response.json()
+
+        if not data.get("ok"):
+            return offset
+
+        for update in data.get(
+            "result",
+            []
+        ):
+
+            update_id = update.get(
+                "update_id"
+            )
+
+            if update_id is not None:
+
+                offset = (
+                    update_id + 1
+                )
+
+                save_offset(
+                    offset
+                )
+
+            post = (
+                update.get(
+                    "channel_post"
+                )
+                or update.get(
+                    "edited_channel_post"
+                )
+            )
+
+            if not post:
+                continue
+
+            chat_id = str(
+                post.get(
+                    "chat",
+                    {}
+                ).get(
+                    "id",
+                    ""
+                )
+            )
+
+            if chat_id != str(
+                CHANNEL_STATS
+            ):
+                continue
+
+            text = post.get(
+                "text",
+                ""
+            )
+
+            parsed = parse_cards_from_message(
+                text
+            )
+
+            if not parsed:
+                continue
+
+            cache_result(
+                parsed["game_number"],
+                text
+            )
+
+            print(
+                f"💾 CHANNEL_STATS -> "
+                f"#{parsed['game_number']} | "
+                f"карты={parsed['cards']}",
+                flush=True
+            )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Updates error: {e}",
+            flush=True
+        )
+
+    return offset
+
+
+# ============================================================
+# API
+# ============================================================
+
+def get_active_games():
+
+    url = (
+        f"{BASE_URL}"
+        f"/service-api/main-live-feed/v3/"
+        f"games1x2"
+        "?cfView=3"
+        "&count=40"
+        "&fcountry=190"
+        "&gr=415"
+        "&grMode=4"
+        "&lng=ru"
+        "&ref=7"
+        "&selectedMs=10.146.1643503"
+    )
+
+    try:
+
+        response = SESSION.get(
+            url,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+
+        games = (
+            data
+            if isinstance(data, list)
+            else data.get(
+                "Value",
+                []
+            )
+        )
+
+        result = []
+
+        for game in games:
+
+            if not isinstance(
+                game,
+                dict
+            ):
+                continue
+
+            league = game.get(
+                "liga",
+                {}
+            )
+
+            if str(
+                league.get("id", "")
+            ) != str(
+                LEAGUE_ID
+            ):
+                continue
+
+            if game.get("id"):
+
+                result.append(
+                    game
+                )
+
+        return result
+
+    except Exception as e:
+
+        print(
+            f"❌ API games: {e}",
+            flush=True
+        )
+
+        return []
+
+
+def get_game_data(game_id):
+
+    url = (
+        f"{BASE_URL}"
+        f"/service-api/LiveFeed/GetGameZip"
+        f"?id={game_id}"
+        f"&isSubGames=true"
+        f"&GroupEvents=true"
+        f"&countevents=250"
+        f"&grMode=4"
+        f"&partner=7"
+        f"&topGroups="
+        f"&country=190"
+        f"&marketType=1"
+        f"&isNewBuilder=true"
+    )
+
+    try:
+
+        response = SESSION.get(
+            url,
+            timeout=7
+        )
+
+        if response.status_code == 200:
+            return response.json()
+
+    except Exception:
+        pass
+
+    return None
+
+
+# ============================================================
+# API PARSER
+# ============================================================
+
+def extract_card(obj):
+
+    if not isinstance(
+        obj,
+        dict
+    ):
+        return None
+
+    rank = None
+    suit = None
+
+    rank_keys = {
+        "rank",
+        "value",
+        "v",
+        "cardvalue",
+        "card_value",
+        "nominal"
+    }
+
+    suit_keys = {
+        "suit",
+        "s",
+        "card_suit",
+        "cardsuit",
+        "mast"
+    }
+
+    for key, value in obj.items():
+
+        key = str(
+            key
+        ).lower()
+
+        if key in rank_keys:
+
+            rank = (
+                normalize_rank(value)
+                or rank
+            )
+
+        if key in suit_keys:
+
+            suit = (
+                normalize_suit(value)
+                or suit
+            )
+
+    if rank and suit:
+
+        return {
+            "rank": rank,
+            "suit": f"{suit}\ufe0f"
+        }
+
+    return None
+
+
+def classify_context(key):
+
+    key = str(
+        key
+    ).lower()
+
+    if key in {
+        "p",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "pcards",
+        "playercards"
+    }:
+        return "player"
+
+    if (
+        key.startswith("player")
+        or "playercard" in key
+    ):
+        return "player"
+
+    if key in {
+        "d",
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "dcards",
+        "dealercards"
+    }:
+        return "dealer"
+
+    if (
+        key.startswith("dealer")
+        or "dealercard" in key
+    ):
+        return "dealer"
+
+    return None
+
+
+def find_cards(
+    obj,
+    context=None,
+    player=None,
+    dealer=None
+):
+
+    if player is None:
+        player = []
+
+    if dealer is None:
+        dealer = []
+
+    if isinstance(
+        obj,
+        dict
+    ):
+
+        card = extract_card(
+            obj
+        )
+
+        if card:
+
+            if context == "player":
+                player.append(card)
+
+            elif context == "dealer":
+                dealer.append(card)
+
+        for key, value in obj.items():
+
+            new_context = (
+                classify_context(key)
+                or context
+            )
+
+            find_cards(
+                value,
+                new_context,
+                player,
+                dealer
+            )
+
+    elif isinstance(
+        obj,
+        list
+    ):
+
+        for item in obj:
+
+            find_cards(
+                item,
+                context,
+                player,
+                dealer
+            )
+
+    return player, dealer
+
+
+def unique_cards(cards):
+
+    result = []
+    seen = set()
+
+    for card in cards:
+
+        text = card_text(
+            card
+        )
+
+        if (
+            not text
+            or text in seen
+        ):
+            continue
+
+        seen.add(text)
+
+        result.append({
+            "rank": normalize_rank(
+                card.get("rank")
+            ),
+            "suit": (
+                f"{normalize_suit(card.get('suit'))}"
+                f"\ufe0f"
+            ),
+        })
+
+    return result
+
+
+def parse_game_data(
+    game_id,
+    raw
+):
+
+    if not raw:
+        return None
+
+    player, dealer = find_cards(
+        raw
+    )
+
+    player = unique_cards(
+        player
+    )
+
+    dealer = unique_cards(
+        dealer
+    )
+
+    if (
+        not player
+        and not dealer
+    ):
+        return None
+
+    sequence = []
+    pos = 1
+
+    for i in range(
+        max(
+            len(player),
+            len(dealer)
+        )
+    ):
+
+        if i < len(player):
+
+            sequence.append({
+                "position": pos,
+                "who": "P",
+                "rank": player[i]["rank"],
+                "suit": player[i]["suit"],
+            })
+
+            pos += 1
+
+        if i < len(dealer):
+
+            sequence.append({
+                "position": pos,
+                "who": "D",
+                "rank": dealer[i]["rank"],
+                "suit": dealer[i]["suit"],
+            })
+
+            pos += 1
+
+    now = datetime.now(
+        MOSCOW_TZ
+    )
+
+    return {
+        "game_id": str(game_id),
+
+        "timestamp_msk": (
+            now.strftime(
+                "%H:%M:%S.%f"
+            )[:-3]
+        ),
+
+        "player_cards": player,
+
+        "dealer_cards": dealer,
+
+        "sequence": sequence,
+
+        "total_cards": (
+            len(player)
+            + len(dealer)
+        ),
+
+        "first_player_card": (
+            player[0]
+            if player
+            else None
+        ),
+
+        "id_last_digit": str(
+            game_id
+        )[-1],
+
+        "id_last_two": str(
+            game_id
+        )[-2:],
+    }
+
+
+def add_or_update_game(game):
+
+    global history
+
+    game_id = str(
+        game.get(
+            "game_id",
+            ""
+        )
+    )
+
+    if not game_id:
+        return False
+
+    index = find_game_index(
+        game_id
+    )
+
+    if index >= 0:
+
+        old = history[index]
+
+        old_count = (
+            len(
+                old.get(
+                    "player_cards",
+                    []
+                )
+            )
+            +
+            len(
+                old.get(
+                    "dealer_cards",
+                    []
+                )
+            )
+        )
+
+        new_count = (
+            len(
+                game.get(
+                    "player_cards",
+                    []
+                )
+            )
+            +
+            len(
+                game.get(
+                    "dealer_cards",
+                    []
+                )
+            )
+        )
+
+        if new_count >= old_count:
+
+            history[index] = game
+
+            save_json(
+                DATA_FILE,
+                history
+            )
+
+        return False
+
+    history.append(
+        game
+    )
+
+    history = history[
+        -MAX_HISTORY_GAMES:
+    ]
+
+    save_json(
+        DATA_FILE,
+        history
+    )
+
+    print(
+        f"💾 Новая игра | "
+        f"ID={game_id} | "
+        f"P1={card_text(game.get('first_player_card'))} | "
+        f"История={len(history)}",
+        flush=True
+    )
+
+    return True
+
+
+# ============================================================
+# PROCESS GAME
+# ============================================================
+
+def process_game(active_game):
+
+    game_id = str(
+        active_game.get(
+            "id",
+            ""
+        )
+    )
+
+    if not game_id:
+        return
+
+    is_new = not game_exists(
+        game_id
+    )
+
+    # ========================================================
+    # LOBBY -> ПРОГНОЗ
+    # ========================================================
+
+    if is_new:
+
+        print(
+            "\n══════════════════════════════════",
+            flush=True
+        )
+
+        print(
+            f"🆕 НОВАЯ ИГРА / ЛОББИ | "
+            f"ID={game_id}",
+            flush=True
+        )
+
+        current_number = get_game_number()
+
+        target_number = (
+            get_lobby_game_number()
+        )
+
+        print(
+            f"🕐 Текущий номер: "
+            f"#N{current_number}",
+            flush=True
+        )
+
+        print(
+            f"🎯 Lobby является следующей "
+            f"игрой: #N{target_number}",
+            flush=True
+        )
+
+        print(
+            f"🎯 ПРОГНОЗ = #N{target_number} | "
+            f"ДОГОН 0",
+            flush=True
+        )
+
+        prediction = create_prediction(
+            game_id,
+            target_number
+        )
+
+        if prediction:
+
+            message = (
+                make_prediction_message(
+                    prediction
+                )
+            )
+
+            prediction[
+                "original_text"
+            ] = message
+
+            message_id = telegram_send(
+                message
+            )
+
+            if message_id:
+
+                prediction[
+                    "message_id"
+                ] = message_id
+
+                save_json(
+                    PREDICTIONS_FILE,
+                    predictions
+                )
+
+                print(
+                    f"📤 ПРОГНОЗ ОТПРАВЛЕН | "
+                    f"#N{prediction['target_number']} | "
+                    f"ДОГОН 0",
+                    flush=True
+                )
+
+    # ========================================================
+    # GetGameZip НЕ УБИРАЕМ
+    #
+    # Он используется только для получения
+    # фактических карт и наполнения history.
+    #
+    # На формирование Lobby-прогноза он
+    # НЕ влияет.
+    # ========================================================
+
+    raw = get_game_data(
+        game_id
+    )
+
+    if raw:
+
+        parsed = parse_game_data(
+            game_id,
+            raw
+        )
+
+        if parsed:
+
+            add_or_update_game(
+                parsed
+            )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    global history
+    global predictions
+
+    history = load_history()
+
+    predictions = load_predictions()
+
+    offset = load_offset()
+
+    print(
+        "\n==================================================",
+        flush=True
+    )
+
+    print(
+        "🚀 OLD BOT — HYBRID + PATTERN SCANNER",
+        flush=True
+    )
+
+    print(
+        "==================================================",
+        flush=True
+    )
+
+    print(
+        f"📚 История: "
+        f"{len(history)} игр",
+        flush=True
+    )
+
+    print(
+        "🤖 Методы: "
+        "MS + ID1 + ID2 + FREQ + PATTERN SCANNER",
+        flush=True
+    )
+
+    print(
+        f"🎯 Мин. вероятность: "
+        f"{MIN_FORECAST_PROBABILITY:.0%}",
+        flush=True
+    )
+
+    print(
+        "🃏 Режим: TOP-2 без требования Gap",
+        flush=True
+    )
+
+    print(
+        f"🧩 Паттерны: длина "
+        f"{PATTERN_LENGTHS}",
+        flush=True
+    )
+
+    print(
+        f"📈 Целевая игра = догон 0 | "
+        f"дальше догон 1-{DOGON_GAMES}",
+        flush=True
+    )
+
+    print(
+        "📡 Прогноз: Lobby",
+        flush=True
+    )
+
+    print(
+        "📊 Проверка: CHANNEL_STATS",
+        flush=True
+    )
+
+    print(
+        "==================================================\n",
+        flush=True
+    )
+
+    while True:
+
+        started = time.time()
+
+        try:
+
+            # ------------------------------------------------
+            # 1. ИЩЕМ НОВЫЕ LOBBY
+            # ------------------------------------------------
+
+            games = get_active_games()
+
+            if games:
+
+                print(
+                    f"📡 API игр: "
+                    f"{len(games)}",
+                    flush=True
+                )
+
+            for game in games:
+
+                try:
+
+                    process_game(
+                        game
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"❌ Ошибка игры: {e}",
+                        flush=True
+                    )
+
+            # ------------------------------------------------
+            # 2. ЧИТАЕМ CHANNEL_STATS
+            # ------------------------------------------------
+
+            offset = process_updates(
+                offset
+            )
+
+            # ------------------------------------------------
+            # 3. ПРОВЕРЯЕМ ПРОГНОЗЫ
+            #
+            # Только после получения результата
+            # текущего номера в CHANNEL_STATS.
+            # ------------------------------------------------
+
+            check_predictions()
+
+            # ------------------------------------------------
+            # ОГРАНИЧЕНИЕ ФАЙЛА ПРОГНОЗОВ
+            # ------------------------------------------------
+
+            if len(predictions) > 1000:
+
+                predictions[:] = (
+                    predictions[-1000:]
+                )
+
+                save_json(
+                    PREDICTIONS_FILE,
+                    predictions
+                )
+
+            elapsed = (
+                time.time()
+                - started
+            )
+
+            time.sleep(
+                max(
+                    0.1,
+                    POLL_INTERVAL
+                    - elapsed
+                )
+            )
+
+        except KeyboardInterrupt:
+
+            print(
+                "🛑 Бот остановлен",
+                flush=True
+            )
+
+            break
+
+        except Exception as e:
+
+            print(
+                f"❌ Критическая ошибка: {e}",
+                flush=True
+            )
+
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
