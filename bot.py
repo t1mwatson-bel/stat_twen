@@ -1115,20 +1115,8 @@ def make_result_message(
 
 def has_pending_prediction():
     """
-    Блокируем НОВЫЙ прогноз, ТОЛЬКО если есть висящий прогноз
-    с догоном 0 (еще даже не проверялся).
-    
-    Как только догон 0 проиграл и перешли на догон 1+
-    — новые прогнозы РАЗРЕШЕНЫ.
+    ОТКЛЮЧЕНА БЛОКИРОВКА - всегда разрешаем новые прогнозы
     """
-    for p in predictions:
-        if p.get("status") != "pending":
-            continue
-        
-        # Если догон 0 — блокируем
-        if p.get("current_dogon", 0) == 0:
-            return True
-    
     return False
 
 
