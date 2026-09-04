@@ -15,7 +15,8 @@ from collections import Counter, defaultdict
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BOT_TOKEN_PROGNOZ")
 CHANNEL_PROGNOZ = os.getenv("CHAT_ID_21") or os.getenv("CHANNEL_PROGNOZ")
-CHANNEL_ID = "-1003477065559"  # Жестко задан канал статистики
+CHANNEL_PROGNOZ = "-1001234567890"  # Твой канал с прогнозами
+CHANNEL_STATS = "-1003477065559"    # Канал статистики
 
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN не задан", flush=True)
