@@ -803,7 +803,7 @@ def get_game_number():
 
 def get_lobby_game_number():
     current_number = get_game_number()
-    retwurn add_game_offset(current_number, 10)
+    return add_game_offset(current_number, 10)
 
 
 def add_game_offset(number, offset):
