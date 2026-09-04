@@ -1135,7 +1135,7 @@ def check_predictions():
 
 def process_updates(offset):
     """Читает канал статистики и заполняет games_cache"""
-    if not CHANNEL_ID:
+    if not CHANNEL_STATS:
         return offset
 
     try:
@@ -1165,7 +1165,7 @@ def process_updates(offset):
                 continue
 
             chat_id = str(post.get("chat", {}).get("id", ""))
-            if chat_id != str(CHANNEL_ID):
+            if chat_id != str(CHANNEL_STATS):
                 continue
 
             text = post.get("text", "")
@@ -1176,7 +1176,7 @@ def process_updates(offset):
 
             games_cache[parsed["game_number"]] = text
             print(
-                f"💾 CHANNEL_ID -> #{parsed['game_number']} | "
+                f"💾 CHANNEL_STATS -> #{parsed['game_number']} | "
                 f"карты={parsed['cards']}",
                 flush=True
             )
@@ -1514,7 +1514,7 @@ def main():
     print("🃏 Режим: TOP-2", flush=True)
     print(f"📈 Догон: 0 → {DOGON_GAMES}", flush=True)
     print("📡 Прогноз: на КАЖДУЮ Lobby", flush=True)
-    print("📊 Проверка: CHANNEL_ID", flush=True)
+    print("📊 Проверка: CHANNEL_STATS", flush=True)
     print("==================================================\n", flush=True)
 
     while True:
