@@ -985,24 +985,35 @@ def create_prediction(game_id, game_number):
 # ============================================================
 
 def parse_cards_from_message(text):
-    """Парсит номер игры и все карты из сообщения"""
+    """
+    Парсит номер игры и ВСЕ карты из сообщения канала статистики.
+    Ищет карты в формате: 6♦️, K♥️, J♣️, 10♦️ и т.д.
+    """
     if not text:
         return None
 
+    # Проверяем, что игра завершена (есть ✅ или 🔰)
+    if not re.search(r'[✅🔰]', text):
+        return None
+
+    # Ищем номер игры
     match = re.search(r"#N(\d+)", text)
     if not match:
         return None
 
     game_number = int(match.group(1))
 
-    # Ищем все карты в формате: 6♦️, K♥️, J♣️, 10♦️
+    # Ищем все карты в тексте
+    # Форматы: 6♦️, K♥️, J♣️, 10♦️
     found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", text)
+    
+    # Если не нашли с эмодзи, пробуем без
     if not found:
         found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])", text)
 
     cards = [f"{rank}{suit}\ufe0f" for rank, suit in found]
 
-    # Если карт нет - ищем в скобках
+    # Если карт нет - ищем в скобках (особый случай)
     if not cards:
         matches = re.findall(r"\((.*?)\)", text)
         for match in matches:
@@ -1010,6 +1021,7 @@ def parse_cards_from_message(text):
             for rank, suit in found_inner:
                 cards.append(f"{rank}{suit}\ufe0f")
 
+    # Убираем дубликаты, сохраняя порядок
     cards = list(dict.fromkeys(cards))
 
     return {
