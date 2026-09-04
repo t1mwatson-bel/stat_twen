@@ -63,7 +63,7 @@ MIN_ID1_MATCHES = 3
 MIN_ID2_MATCHES = 2
 MIN_PATTERN_MATCHES = 3
 
-MIN_FORECAST_PROBABILITY = 0.17
+MIN_FORECAST_PROBABILITY = 0.20
 MIN_ACTIVE_METHODS = 2
 
 PATTERN_LENGTHS = (2, 3, 4, 5)
@@ -803,7 +803,7 @@ def get_game_number():
 
 def get_lobby_game_number():
     current_number = get_game_number()
-    return add_game_offset(current_number, 1)
+    retwurn add_game_offset(current_number, 10)
 
 
 def add_game_offset(number, offset):
