@@ -14,8 +14,8 @@ from collections import Counter, defaultdict
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BOT_TOKEN_PROGNOZ")
-CHANNEL_PROGNOZ = "-1003788947004"  # ЗАМЕНИ НА РЕАЛЬНЫЙ ID КАНАЛА ПРОГНОЗОВ
-CHANNEL_STATS = "-1003477065559"    # Канал статистики
+CHANNEL_PROGNOZ = "-1003788947004"
+CHANNEL_STATS = "-1003477065559"
 
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN не задан", flush=True)
@@ -238,7 +238,6 @@ def load_history():
 
 def load_predictions():
     data = load_json(PREDICTIONS_FILE, [])
-
     return data if isinstance(data, list) else []
 
 
@@ -314,7 +313,6 @@ def get_game_tokens(game):
 
 def get_game_signature(game):
     tokens = get_game_tokens(game)
-
     return "|".join(tokens[:6])
 
 
@@ -899,24 +897,69 @@ def make_result_message(entry, status, found_card=None, result_game=None):
 
 
 # ============================================================
+# PARSE CARDS (С ПРОВЕРКОЙ СТАТУСОВ)
+# ============================================================
+
+def parse_cards_from_message(text):
+    """
+    Парсит номер игры и ВСЕ карты из сообщения канала статистики.
+    Учитывает статусы: 🔰 (завершена) и ✅ (завершена/выиграна)
+    """
+    if not text:
+        return None
+
+    # ✅ ПРОВЕРЯЕМ, ЧТО ИГРА ЗАВЕРШЕНА (есть ✅ или 🔰)
+    if not re.search(r'[✅🔰]', text):
+        return None
+
+    # Ищем номер игры
+    match = re.search(r"#N(\d+)", text)
+    if not match:
+        return None
+
+    game_number = int(match.group(1))
+
+    # Ищем все карты в тексте
+    found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", text)
+    
+    if not found:
+        found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])", text)
+
+    cards = [f"{rank}{suit}\ufe0f" for rank, suit in found]
+
+    if not cards:
+        matches = re.findall(r"\((.*?)\)", text)
+        for match in matches:
+            found_inner = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", match)
+            for rank, suit in found_inner:
+                cards.append(f"{rank}{suit}\ufe0f")
+
+    cards = list(dict.fromkeys(cards))
+
+    return {
+        "game_number": game_number,
+        "cards": cards,
+    }
+
+
+# ============================================================
 # PREDICTIONS
 # ============================================================
 
 def has_pending_prediction():
-    """НИКОГДА НЕ БЛОКИРУЕМ - даем прогноз на КАЖДУЮ новую игру"""
+    for entry in predictions:
+        if entry.get("status") == "pending":
+            return True
     return False
 
 
 def prediction_exists(game_id, target_number=None):
-    """Проверяет, есть ли прогноз на игру (по ID или по номеру)"""
     game_id = str(game_id)
     
     for p in predictions:
-        # Проверка по API ID
         if str(p.get("target_game_id")) == game_id:
             return True
         
-        # Проверка по номеру игры
         if target_number and p.get("target_number") == target_number:
             return True
     
@@ -964,9 +1007,9 @@ def create_prediction(game_id, game_number):
         "timestamp_msk": timestamp,
         "hybrid": result,
         "predicted_card": result["card"],
-        "predicted_cards": [result["card"], result.get("second_card")],
-        "status": "pending",
-        "current_dogon": 0,
+        "predicted_cards": [result["card"], result.get("second_card")],  # ✅ ДОБАВИЛ
+        "status": "pending",                                              # ✅ УЖЕ БЫЛО
+        "current_dogon": 0,                                               # ✅ ДОБАВИЛ
         "created_at": datetime.now(MOSCOW_TZ).isoformat(),
         "message_id": None,
         "original_text": "",
@@ -979,56 +1022,6 @@ def create_prediction(game_id, game_number):
     last_prediction_time = now_ts
 
     return entry
-
-
-# ============================================================
-# PARSE CARDS
-# ============================================================
-
-def parse_cards_from_message(text):
-    """
-    Парсит номер игры и ВСЕ карты из сообщения канала статистики.
-    Ищет карты в формате: 6♦️, K♥️, J♣️, 10♦️ и т.д.
-    """
-    if not text:
-        return None
-
-    # Проверяем, что игра завершена (есть ✅ или 🔰)
-    if not re.search(r'[✅🔰]', text):
-        return None
-
-    # Ищем номер игры
-    match = re.search(r"#N(\d+)", text)
-    if not match:
-        return None
-
-    game_number = int(match.group(1))
-
-    # Ищем все карты в тексте
-    # Форматы: 6♦️, K♥️, J♣️, 10♦️
-    found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", text)
-    
-    # Если не нашли с эмодзи, пробуем без
-    if not found:
-        found = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])", text)
-
-    cards = [f"{rank}{suit}\ufe0f" for rank, suit in found]
-
-    # Если карт нет - ищем в скобках (особый случай)
-    if not cards:
-        matches = re.findall(r"\((.*?)\)", text)
-        for match in matches:
-            found_inner = re.findall(r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?", match)
-            for rank, suit in found_inner:
-                cards.append(f"{rank}{suit}\ufe0f")
-
-    # Убираем дубликаты, сохраняя порядок
-    cards = list(dict.fromkeys(cards))
-
-    return {
-        "game_number": game_number,
-        "cards": cards,
-    }
 
 
 # ============================================================
@@ -1054,7 +1047,7 @@ def save_offset(offset):
 
 
 # ============================================================
-# PROCESS UPDATES - ЧИТАЕТ КАНАЛ ЧЕРЕЗ getUpdates
+# PROCESS UPDATES
 # ============================================================
 
 def process_updates(offset):
@@ -1112,7 +1105,7 @@ def process_updates(offset):
 
 
 # ============================================================
-# CHECK PREDICTIONS - ПРОВЕРЯЕТ ПРОГНОЗЫ ПО games_cache
+# CHECK PREDICTIONS (ИСПРАВЛЕННАЯ)
 # ============================================================
 
 def check_predictions():
@@ -1136,7 +1129,7 @@ def check_predictions():
             continue
 
         target = entry.get("target_number")
-        predicted_cards = entry.get("predicted_cards", [])
+        predicted_cards = entry.get("predicted_cards", [])  # ✅ ТЕПЕРЬ ЕСТЬ!
         msg_id = entry.get("message_id")
 
         if not target or not predicted_cards or not msg_id:
@@ -1160,6 +1153,7 @@ def check_predictions():
 
             actual_cards = parsed.get("cards", [])
 
+            # ✅ Ищем совпадение с predicted_cards
             hit_card = next(
                 (card for card in predicted_cards if card in actual_cards),
                 None
@@ -1474,7 +1468,6 @@ def process_game(active_game):
 
     target_number = get_lobby_game_number()
 
-    # Проверяем, есть ли уже прогноз на эту игру (по ID или по номеру)
     if prediction_exists(game_id, target_number):
         print(f"⏭️ Прогноз уже существует на #N{target_number} (ID:{game_id})", flush=True)
         return
@@ -1499,7 +1492,6 @@ def process_game(active_game):
             save_json(PREDICTIONS_FILE, predictions)
             print(f"📤 ПРОГНОЗ ОТПРАВЛЕН | #N{prediction['target_number']}", flush=True)
 
-    # Всегда пытаемся получить карты для истории
     raw = get_game_data(game_id)
     if raw:
         parsed = parse_game_data(game_id, raw)
@@ -1534,7 +1526,6 @@ def main():
         started = time.time()
 
         try:
-            # 1. Ищем новые Lobby
             games = get_active_games()
             if games:
                 print(f"📡 API игр: {len(games)}", flush=True)
@@ -1545,13 +1536,10 @@ def main():
                 except Exception as e:
                     print(f"❌ Ошибка игры: {e}", flush=True)
 
-            # 2. Читаем канал статистики через getUpdates
             offset = process_updates(offset)
 
-            # 3. Проверяем прогнозы
             check_predictions()
 
-            # 4. Ограничиваем файл прогнозов
             if len(predictions) > 1000:
                 predictions[:] = predictions[-1000:]
                 save_json(PREDICTIONS_FILE, predictions)
