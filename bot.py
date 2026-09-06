@@ -4146,7 +4146,7 @@ def finalize_disappeared_games(active_ids):
             continue
 
                 tracked_games.pop(gid, None)
-                continue
+            continue
 
         # ============================================================
         # Если STATE не 3/4/5 или STATE=3 без полных карт
