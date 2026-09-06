@@ -1070,7 +1070,10 @@ def process_telegram_updates(offset):
     global predictions, games_cache
 
     if not CHANNEL_STATS:
+        print("❌ CHANNEL_STATS не задан, пропускаем Telegram")
         return offset
+
+    print("📥 Проверяем обновления Telegram...")
 
     try:
         response = SESSION.get(
@@ -1081,9 +1084,13 @@ def process_telegram_updates(offset):
 
         data = response.json()
         if not data.get("ok"):
+            print(f"❌ Ошибка Telegram API: {data}")
             return offset
 
-        for update in data.get("result", []):
+        updates = data.get("result", [])
+        print(f"📥 Получено обновлений: {len(updates)}")
+
+        for update in updates:
             update_id = update.get("update_id")
             if update_id is not None:
                 offset = update_id + 1
@@ -1098,12 +1105,14 @@ def process_telegram_updates(offset):
                 continue
 
             text = post.get("text", "")
+            print(f"📩 Сообщение из канала: {text[:200]}...")
 
             # ✅ СОХРАНЯЕМ ЗАВЕРШЕННЫЕ ИГРЫ В КЭШ И ИСТОРИЮ
             parsed = parse_cards_from_message(text)
             if parsed:
                 games_cache[parsed["game_number"]] = text
-                
+                print(f"💾 КЭШ: #{parsed['game_number']} -> {parsed['cards']}")
+
                 # Сохраняем завершенную игру в историю
                 game_data = {
                     "game_id": None,
@@ -1116,23 +1125,24 @@ def process_telegram_updates(offset):
                     "total_cards": len(parsed["cards"]),
                     "source": "telegram"
                 }
-                
-                # Пытаемся найти game_id из текста
+
                 id_match = re.search(r"ID:\s*(\d+)", text)
                 if id_match:
                     game_data["game_id"] = id_match.group(1)
-                
+
                 add_game_to_history(game_data)
                 print(f"💾 Сохранена завершенная игра #N{parsed['game_number']} из канала")
 
             # ✅ ИЩЕМ НОВУЮ ИГРУ (С ОЖИДАНИЕМ)
             if "⏳ Ожидание игры" in text:
+                print("🔍 Найдено сообщение с '⏳ Ожидание игры'")
                 id_match = re.search(r"ID:\s*(\d+)", text)
                 num_match = re.search(r"#N(\d+)", text)
 
                 if id_match and num_match:
                     game_id = id_match.group(1)
                     game_number = int(num_match.group(1))
+                    print(f"🆕 Парсинг: ID={game_id}, #N={game_number}")
 
                     # Проверяем, есть ли уже прогноз на этот номер
                     has_prediction = False
@@ -1154,6 +1164,14 @@ def process_telegram_updates(offset):
                                 prediction["message_id"] = message_id
                                 atomic_save_json(PREDICTIONS_FILE, predictions)
                                 print(f"📤 ОТПРАВЛЕНО: {prediction['predicted_card']} на #N{game_number}")
+                    else:
+                        print(f"⏭️ Прогноз на #N{game_number} уже существует")
+                else:
+                    print("⚠️ Не удалось извлечь ID или номер из сообщения")
+            else:
+                # Если сообщение не содержит "⏳ Ожидание игры", можно вывести его тип
+                if "✅" in text or "🔰" in text:
+                    print("📌 Сообщение с результатом игры (пропускаем)")
 
     except Exception as e:
         print(f"⚠️ Updates error: {e}")
