@@ -4109,10 +4109,14 @@ def finalize_disappeared_games(active_ids):
                 raw
             )
 
+            continue
+
         # =========================================================
         # STATE=3 / STATE=4
-        # Запоминаем состояние и карты.
-        # На следующем исчезновении сохраним из кэша.
+        #
+        # Финальная проверка увидела готовые карты.
+        # Они уже сохранены inspect_game_state() в tracked_games.
+        # Не удаляем игру — при следующем цикле она сохранится из кэша.
         # =========================================================
 
         elif str(state) in {"3", "4"}:
@@ -4138,6 +4142,8 @@ def finalize_disappeared_games(active_ids):
                 f"| P2={len(info.get('dealer', []))}",
                 flush=True
             )
+
+            continue
 
                 tracked_games.pop(gid, None)
                 continue
