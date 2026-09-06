@@ -4070,7 +4070,7 @@ def finalize_disappeared_games(active_ids):
 
         tracked_games.pop(gid, None)
 
-            continue
+        continue
 
         info["final_attempts"] = (
             attempts + 1
