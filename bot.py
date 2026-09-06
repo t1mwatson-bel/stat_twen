@@ -58,6 +58,15 @@ TARGET_CARDS = [
     "A♠️", "A♣️", "A♦️", "A♥️"
 ]
 
+# ================================================================
+# ТИПЫ ПРОГНОЗОВ
+#
+# Один ID может иметь несколько типов одновременно:
+# #R #G #O
+# ================================================================
+
+FORECAST_TYPES = ("R", "G", "O", "X")
+
 
 # =====================================================================
 # HYBRID WEIGHTS
@@ -144,7 +153,21 @@ RANKS = {
 
 history = []
 predictions = []
+
+# Кэш результатов Telegram.
+# game_number -> список записей.
 games_cache = {}
+
+# ID -> набор Telegram-тегов.
+#
+# Например:
+# {
+#     "750598382": {"R", "G", "O"},
+#     "750613777": {"X"}
+# }
+#
+game_tags = {}
+
 tracked_games = {}
 
 last_prediction_time = 0
@@ -376,6 +399,37 @@ def load_history():
         and g.get("game_id")
     ]
 
+    # ---------------------------------------------------------------
+    # Восстанавливаем game_tags из уже сохраненной истории.
+    # ---------------------------------------------------------------
+
+    for game in history:
+
+        gid = str(
+            game.get("game_id", "")
+        )
+
+        if not gid:
+            continue
+
+        tags = (
+            game.get("forecast_types")
+            or game.get("tags")
+            or []
+        )
+
+        if isinstance(tags, str):
+            tags = [tags]
+
+        valid_tags = {
+            str(tag).upper()
+            for tag in tags
+            if str(tag).upper() in FORECAST_TYPES
+        }
+
+        if valid_tags:
+            game_tags[gid] = valid_tags
+
     cleanup_history_by_time(
         save=False
     )
@@ -409,6 +463,150 @@ def find_game_index(gid):
 
 def game_exists(gid):
     return find_game_index(gid) != -1
+
+
+# =====================================================================
+# TAG HELPERS
+# =====================================================================
+
+def normalize_forecast_tags(tags):
+    """
+    Оставляет только R/G/O/X.
+    """
+
+    if not tags:
+        return set()
+
+    if isinstance(tags, str):
+        tags = [tags]
+
+    result = set()
+
+    for tag in tags:
+
+        tag = str(tag).strip().upper().lstrip("#")
+
+        if tag in FORECAST_TYPES:
+            result.add(tag)
+
+    return result
+
+
+def get_record_forecast_types(record):
+    """
+    Возвращает типы прогноза конкретной игры.
+    """
+
+    tags = (
+        record.get("forecast_types")
+        or record.get("tags")
+        or []
+    )
+
+    return normalize_forecast_tags(tags)
+
+
+def record_supports_type(record, forecast_type):
+    """
+    True только если игра относится к нужному типу.
+
+    Например:
+        запись #R #O
+        поддерживает R
+        поддерживает O
+        НЕ поддерживает G
+        НЕ поддерживает X
+    """
+
+    if not forecast_type:
+        return True
+
+    forecast_type = str(
+        forecast_type
+    ).upper().lstrip("#")
+
+    return forecast_type in get_record_forecast_types(
+        record
+    )
+
+
+def attach_tags_to_history(game_id, tags):
+    """
+    Привязывает Telegram-теги к истории по точному ID.
+
+    API тегов не знает.
+    Telegram знает.
+    """
+
+    global history
+    global game_tags
+
+    gid = str(game_id)
+
+    normalized = normalize_forecast_tags(tags)
+
+    if not gid or not normalized:
+        return False
+
+    old_tags = game_tags.get(
+        gid,
+        set()
+    )
+
+    merged_tags = (
+        set(old_tags)
+        | set(normalized)
+    )
+
+    game_tags[gid] = merged_tags
+
+    idx = find_game_index(gid)
+
+    if idx == -1:
+        return False
+
+    record = history[idx]
+
+    current = get_record_forecast_types(
+        record
+    )
+
+    final_tags = (
+        current
+        | merged_tags
+    )
+
+    record["forecast_types"] = sorted(
+        final_tags
+    )
+
+    # Оставляем tags тоже для совместимости.
+    record["tags"] = sorted(
+        final_tags
+    )
+
+    atomic_save_json(
+        DATA_FILE,
+        history
+    )
+
+    print(
+        f"🏷️ Теги обновлены | "
+        f"ID={gid} | "
+        f"#{', #'.join(sorted(final_tags))}",
+        flush=True
+    )
+
+    return True
+
+
+def get_tags_for_game(game_id):
+    return sorted(
+        game_tags.get(
+            str(game_id),
+            set()
+        )
+    )
 
 
 # =====================================================================
@@ -791,6 +989,9 @@ def parse_game_data(game_id, raw):
     """
     Парсит завершённую игру
     напрямую из API SC -> S -> P1/P2/STATE.
+
+    Хэштеги НЕ берутся из API.
+    Они добавляются отдельно из Telegram через game_tags.
     """
 
     if not raw:
@@ -847,8 +1048,12 @@ def parse_game_data(game_id, raw):
 
             pos += 1
 
+    gid = str(game_id)
+
+    tags = get_tags_for_game(gid)
+
     return {
-        "game_id": str(game_id),
+        "game_id": gid,
 
         "timestamp": now.isoformat(),
 
@@ -901,13 +1106,22 @@ def parse_game_data(game_id, raw):
             else None
         ),
 
-        "id_last_digit": str(game_id)[-1],
+        "id_last_digit": gid[-1],
 
         "id_last_two": (
-            str(game_id)[-2:]
-            if len(str(game_id)) >= 2
+            gid[-2:]
+            if len(gid) >= 2
             else ""
-        )
+        ),
+
+        # -----------------------------------------------------------
+        # Telegram-теги.
+        # Если Telegram ещё не прислал игру,
+        # список будет пустым и позже будет дополнен по ID.
+        # -----------------------------------------------------------
+
+        "forecast_types": tags,
+        "tags": tags
     }
 
 
@@ -932,6 +1146,41 @@ def add_or_update_game(game):
     idx = find_game_index(gid)
 
     if idx != -1:
+
+        # -----------------------------------------------------------
+        # Если игра уже есть, но Telegram позже дал теги,
+        # обновляем существующую запись.
+        # -----------------------------------------------------------
+
+        tags = normalize_forecast_tags(
+            game.get("forecast_types")
+            or game.get("tags")
+            or []
+        )
+
+        if tags:
+
+            old_tags = get_record_forecast_types(
+                history[idx]
+            )
+
+            final_tags = old_tags | tags
+
+            history[idx]["forecast_types"] = sorted(
+                final_tags
+            )
+
+            history[idx]["tags"] = sorted(
+                final_tags
+            )
+
+            game_tags[gid] = final_tags
+
+            atomic_save_json(
+                DATA_FILE,
+                history
+            )
+
         return False
 
     history.append(game)
@@ -952,11 +1201,25 @@ def add_or_update_game(game):
         history
     )
 
+    tags = get_record_forecast_types(
+        game
+    )
+
+    tag_text = (
+        ", ".join(
+            f"#{x}"
+            for x in tags
+        )
+        if tags
+        else "нет"
+    )
+
     print(
         f"💾 Новая завершённая игра | "
         f"ID={gid} | "
         f"P1={len(game.get('player_cards', []))} | "
         f"P2={len(game.get('dealer_cards', []))} | "
+        f"ТИПЫ={tag_text} | "
         f"База={len(history)} игр/"
         f"{HISTORY_HOURS}ч",
         flush=True
@@ -1023,7 +1286,10 @@ def get_top_from_distribution(dist):
 # METHOD 1 — MILLISECONDS
 # =====================================================================
 
-def method_milliseconds(timestamp_msk):
+def method_milliseconds(
+    timestamp_msk,
+    forecast_type=None
+):
     if not timestamp_msk:
         return {}
 
@@ -1042,6 +1308,18 @@ def method_milliseconds(timestamp_msk):
     matches = 0
 
     for record in history:
+
+        # -----------------------------------------------------------
+        # КЛЮЧЕВОЕ:
+        # для #R смотрим только #R,
+        # для #G только #G и т.д.
+        # -----------------------------------------------------------
+
+        if not record_supports_type(
+            record,
+            forecast_type
+        ):
+            continue
 
         record_time = record.get(
             "timestamp_msk",
@@ -1089,7 +1367,10 @@ def method_milliseconds(timestamp_msk):
 # METHOD 2 — LAST ID DIGIT
 # =====================================================================
 
-def method_id1(game_id):
+def method_id1(
+    game_id,
+    forecast_type=None
+):
     game_id = str(game_id)
 
     if not game_id:
@@ -1101,6 +1382,12 @@ def method_id1(game_id):
     matches = 0
 
     for record in history:
+
+        if not record_supports_type(
+            record,
+            forecast_type
+        ):
+            continue
 
         rid = str(
             record.get("game_id", "")
@@ -1142,7 +1429,10 @@ def method_id1(game_id):
 # METHOD 3 — LAST 2 ID DIGITS
 # =====================================================================
 
-def method_id2(game_id):
+def method_id2(
+    game_id,
+    forecast_type=None
+):
     game_id = str(game_id)
 
     if len(game_id) < 2:
@@ -1154,6 +1444,12 @@ def method_id2(game_id):
     matches = 0
 
     for record in history:
+
+        if not record_supports_type(
+            record,
+            forecast_type
+        ):
+            continue
 
         rid = str(
             record.get("game_id", "")
@@ -1195,14 +1491,24 @@ def method_id2(game_id):
 # METHOD 4 — LOCAL FREQUENCY
 # =====================================================================
 
-def method_frequency():
+def method_frequency(
+    forecast_type=None
+):
     counter = Counter()
 
+    # Берём последние 150 ЗАПИСЕЙ,
+    # но из них только нужный тип.
     recent = history[-150:]
 
     matches = 0
 
     for record in recent:
+
+        if not record_supports_type(
+            record,
+            forecast_type
+        ):
+            continue
 
         cards = get_target_cards_from_record(
             record
@@ -1261,11 +1567,26 @@ def get_game_signature(game):
     return tuple(signature)
 
 
-def method_sequence():
-    if len(history) < 10:
+def method_sequence(
+    forecast_type=None
+):
+    # ---------------------------------------------------------------
+    # Последние игры для поиска паттерна тоже фильтруем по типу.
+    # ---------------------------------------------------------------
+
+    typed_history = [
+        record
+        for record in history
+        if record_supports_type(
+            record,
+            forecast_type
+        )
+    ]
+
+    if len(typed_history) < 10:
         return {}
 
-    recent = history[-5:]
+    recent = typed_history[-5:]
 
     if not recent:
         return {}
@@ -1285,7 +1606,8 @@ def method_sequence():
     counter = Counter()
     matches = 0
 
-    for record in history[:-5]:
+    # Не используем последние 5 в качестве обучающих результатов.
+    for record in typed_history[:-5]:
 
         sig = get_game_signature(record)
 
@@ -1324,24 +1646,32 @@ def method_sequence():
 
 def build_hybrid_prediction(
     game_id,
-    timestamp_msk
+    timestamp_msk,
+    forecast_type
 ):
     results = [
         method_milliseconds(
-            timestamp_msk
+            timestamp_msk,
+            forecast_type
         ),
 
         method_id1(
-            game_id
+            game_id,
+            forecast_type
         ),
 
         method_id2(
-            game_id
+            game_id,
+            forecast_type
         ),
 
-        method_frequency(),
+        method_frequency(
+            forecast_type
+        ),
 
-        method_sequence()
+        method_sequence(
+            forecast_type
+        )
     ]
 
     active = []
@@ -1389,7 +1719,8 @@ def build_hybrid_prediction(
     if len(active) < MIN_ACTIVE_METHODS:
 
         print(
-            f"⏭️ Недостаточно методов: "
+            f"⏭️ [{forecast_type}] "
+            f"Недостаточно методов: "
             f"{active}",
             flush=True
         )
@@ -1440,6 +1771,8 @@ def build_hybrid_prediction(
             supporters.append(name)
 
     return {
+        "forecast_type": forecast_type,
+
         "card": best_card,
         "probability": best_probability,
 
@@ -1639,6 +1972,11 @@ def telegram_edit(
 def make_prediction_message(entry):
     result = entry["hybrid"]
 
+    forecast_type = entry.get(
+        "prediction_type",
+        "?"
+    )
+
     card1 = result["card"]
     prob1 = result["probability"]
 
@@ -1653,7 +1991,8 @@ def make_prediction_message(entry):
     )
 
     text = (
-        f"🎯 Игра: #N{entry['target_number']}\n"
+        f"🎯 #{forecast_type} | "
+        f"Игра: #N{entry['target_number']}\n"
         f"🃏 {card1} — {prob1*100:.1f}%\n"
         f"🥈 {card2} — {prob2*100:.1f}%"
     )
@@ -1662,30 +2001,106 @@ def make_prediction_message(entry):
 
 
 # =====================================================================
-# PARSE CARDS FROM MESSAGE
+# PARSE TELEGRAM GAME MESSAGE
 # =====================================================================
 
-def parse_cards_from_message(text):
+def parse_stats_message(text):
+    """
+    Универсальный парсер сообщения статистики.
+
+    Из Telegram берём:
+        #N
+        ID
+        #R
+        #G
+        #O
+        #X
+        карты
+
+    API здесь вообще не используется.
+    """
+
     if not text:
         return None
 
-    if not re.search(
-        r'[✅🔰]',
-        text
-    ):
-        return None
-
-    match = re.search(
+    num_match = re.search(
         r"#N(\d+)",
         text
     )
 
-    if not match:
+    if not num_match:
         return None
 
     game_number = int(
-        match.group(1)
+        num_match.group(1)
     )
+
+    # ---------------------------------------------------------------
+    # ID
+    # Поддерживаем:
+    # (ID: 750598382)
+    # ID: 750598382
+    # ID=750598382
+    # ---------------------------------------------------------------
+
+    id_match = re.search(
+        r"\bID\s*[:=]\s*(\d+)",
+        text,
+        re.IGNORECASE
+    )
+
+    game_id = (
+        id_match.group(1)
+        if id_match
+        else None
+    )
+
+    # ---------------------------------------------------------------
+    # ВСЕ теги одновременно.
+    #
+    # Например:
+    # #R #G #O
+    #
+    # получим:
+    # {"R", "G", "O"}
+    # ---------------------------------------------------------------
+
+    tags = set(
+        re.findall(
+            r"#(R|G|O|X)\b",
+            text,
+            re.IGNORECASE
+        )
+    )
+
+    tags = {
+        tag.upper()
+        for tag in tags
+    }
+
+    # ---------------------------------------------------------------
+    # Определяем завершённую игру.
+    # ---------------------------------------------------------------
+
+    finished = bool(
+        re.search(
+            r"[✅🔰]",
+            text
+        )
+    )
+
+    # ---------------------------------------------------------------
+    # Ожидание игры.
+    # ---------------------------------------------------------------
+
+    waiting = (
+        "⏳ Ожидание игры"
+        in text
+    )
+
+    # ---------------------------------------------------------------
+    # Карты.
+    # ---------------------------------------------------------------
 
     found = re.findall(
         r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?",
@@ -1704,6 +2119,10 @@ def parse_cards_from_message(text):
         for rank, suit in found
     ]
 
+    # ---------------------------------------------------------------
+    # Запасной вариант — содержимое скобок.
+    # ---------------------------------------------------------------
+
     if not cards:
 
         matches = re.findall(
@@ -1711,11 +2130,11 @@ def parse_cards_from_message(text):
             text
         )
 
-        for match in matches:
+        for inner in matches:
 
             found_inner = re.findall(
                 r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?",
-                match
+                inner
             )
 
             for rank, suit in found_inner:
@@ -1730,8 +2149,168 @@ def parse_cards_from_message(text):
 
     return {
         "game_number": game_number,
+
+        "game_id": game_id,
+
+        "forecast_types": sorted(tags),
+
         "cards": cards,
+
+        "finished": finished,
+
+        "waiting": waiting,
+
+        "text": text
     }
+
+
+# =====================================================================
+# OLD COMPATIBILITY FUNCTION
+# =====================================================================
+
+def parse_cards_from_message(text):
+    """
+    Оставляем старое имя функции,
+    но теперь возвращаем расширенную информацию.
+    """
+
+    parsed = parse_stats_message(
+        text
+    )
+
+    if not parsed:
+        return None
+
+    if not parsed.get("finished"):
+        return None
+
+    return parsed
+
+
+# =====================================================================
+# TELEGRAM RESULT CACHE
+# =====================================================================
+
+def cache_finished_game(parsed):
+    """
+    Сохраняет завершённую Telegram-игру в кэш.
+
+    Один #N потенциально может иметь разные ID,
+    поэтому внутри #N храним список записей.
+    """
+
+    if not parsed:
+        return
+
+    if not parsed.get("finished"):
+        return
+
+    game_number = parsed.get(
+        "game_number"
+    )
+
+    if game_number is None:
+        return
+
+    game_id = parsed.get(
+        "game_id"
+    )
+
+    tags = normalize_forecast_tags(
+        parsed.get("forecast_types", [])
+    )
+
+    record = {
+        "game_number": game_number,
+
+        "game_id": (
+            str(game_id)
+            if game_id
+            else None
+        ),
+
+        "forecast_types": sorted(tags),
+
+        "cards": parsed.get(
+            "cards",
+            []
+        ),
+
+        "text": parsed.get(
+            "text",
+            ""
+        )
+    }
+
+    bucket = games_cache.setdefault(
+        game_number,
+        []
+    )
+
+    # ---------------------------------------------------------------
+    # Обновляем запись по точному ID,
+    # а не создаём дубликат.
+    # ---------------------------------------------------------------
+
+    replaced = False
+
+    if game_id:
+
+        for i, old in enumerate(bucket):
+
+            if str(
+                old.get("game_id")
+            ) == str(game_id):
+
+                bucket[i] = record
+                replaced = True
+                break
+
+    # Если ID нет — используем текст как запасной ключ.
+    if not replaced and not game_id:
+
+        for i, old in enumerate(bucket):
+
+            if old.get("text") == record["text"]:
+
+                bucket[i] = record
+                replaced = True
+                break
+
+    if not replaced:
+        bucket.append(record)
+
+    # ---------------------------------------------------------------
+    # Обновляем глобальное соответствие ID -> теги.
+    # ---------------------------------------------------------------
+
+    if game_id and tags:
+
+        gid = str(game_id)
+
+        old_tags = game_tags.get(
+            gid,
+            set()
+        )
+
+        game_tags[gid] = (
+            old_tags
+            | tags
+        )
+
+        attach_tags_to_history(
+            gid,
+            tags
+        )
+
+    print(
+        f"💾 КЭШ: "
+        f"#N{game_number} | "
+        f"ID={game_id or 'нет'} | "
+        f"карты={parsed.get('cards', [])} | "
+        f"типы={sorted(tags) if tags else []}",
+        flush=True
+    )
 
 
 # =====================================================================
@@ -1827,23 +2406,13 @@ def get_game_data(game_id):
 
 
 # =====================================================================
-# НОВАЯ ПРОВЕРКА ID ПЕРЕД ПРОГНОЗОМ
+# ПРОВЕРКА ID ПЕРЕД ПРОГНОЗОМ
 # =====================================================================
 
 def check_target_game_before_prediction(game_id):
     """
     Проверяет ИМЕННО тот ID, который пришёл
     из канала статистики.
-
-    True:
-        ID найден через API,
-        игра ещё не началась,
-        карт нет.
-
-    False:
-        ID не найден,
-        игра уже началась,
-        либо игра уже в финальном состоянии.
     """
 
     game_id = str(game_id)
@@ -1877,10 +2446,6 @@ def check_target_game_before_prediction(game_id):
         flush=True
     )
 
-    # ---------------------------------------------------------------
-    # ЕСЛИ КАРТЫ УЖЕ ЕСТЬ — ИГРА УЖЕ НАЧАЛАСЬ
-    # ---------------------------------------------------------------
-
     if player or dealer:
 
         print(
@@ -1892,10 +2457,6 @@ def check_target_game_before_prediction(game_id):
         )
 
         return False
-
-    # ---------------------------------------------------------------
-    # ФИНАЛЬНЫЕ СОСТОЯНИЯ
-    # ---------------------------------------------------------------
 
     if str(state) in {
         "4",
@@ -1910,10 +2471,6 @@ def check_target_game_before_prediction(game_id):
         )
 
         return False
-
-    # ---------------------------------------------------------------
-    # ID ЕСТЬ В API И КАРТ НЕТ
-    # ---------------------------------------------------------------
 
     print(
         f"✅ ID={game_id} найден в API "
@@ -1998,99 +2555,129 @@ def process_telegram_updates(offset):
                 ""
             )
 
-            # -------------------------------------------------------
-            # СОХРАНЕНИЕ ЗАВЕРШЁННЫХ ИГР В КЭШ
-            # -------------------------------------------------------
+            # =======================================================
+            # ПАРСИМ ЛЮБОЕ СООБЩЕНИЕ СТАТИСТИКИ
+            # =======================================================
 
-            parsed = parse_cards_from_message(
+            parsed = parse_stats_message(
                 text
             )
 
-            if parsed:
+            if not parsed:
+                continue
 
-                games_cache[
-                    parsed["game_number"]
-                ] = text
+            game_id = parsed.get(
+                "game_id"
+            )
+
+            tags = normalize_forecast_tags(
+                parsed.get(
+                    "forecast_types",
+                    []
+                )
+            )
+
+            game_number = parsed.get(
+                "game_number"
+            )
+
+            # =======================================================
+            # СНАЧАЛА СОХРАНЯЕМ ТЕГИ ПО EXACT ID
+            #
+            # Даже если API уже успел записать игру,
+            # мы потом дополним существующую запись.
+            # =======================================================
+
+            if game_id and tags:
+
+                gid = str(game_id)
+
+                old_tags = game_tags.get(
+                    gid,
+                    set()
+                )
+
+                game_tags[gid] = (
+                    old_tags
+                    | tags
+                )
+
+                attach_tags_to_history(
+                    gid,
+                    tags
+                )
 
                 print(
-                    f"💾 КЭШ: "
-                    f"#{parsed['game_number']} "
-                    f"-> {parsed['cards']}",
+                    f"🏷️ Telegram ID={gid} -> "
+                    f"{sorted(game_tags[gid])}",
                     flush=True
                 )
 
-            # -------------------------------------------------------
-            # НОВАЯ ИГРА
-            # -------------------------------------------------------
+            # =======================================================
+            # ЗАВЕРШЁННАЯ ИГРА -> КЭШ
+            # =======================================================
 
-            if "⏳ Ожидание игры" not in text:
+            if parsed.get("finished"):
+
+                cache_finished_game(
+                    parsed
+                )
+
+            # =======================================================
+            # НЕ НОВАЯ ИГРА
+            # =======================================================
+
+            if not parsed.get("waiting"):
                 continue
 
-            id_match = re.search(
-                r"ID:\s*(\d+)",
-                text
-            )
+            # =======================================================
+            # ОЖИДАНИЕ ДОЛЖНО ИМЕТЬ ID
+            # =======================================================
 
-            num_match = re.search(
-                r"#N(\d+)",
-                text
-            )
-
-            if not id_match or not num_match:
-                continue
-
-            game_id = id_match.group(1)
-
-            game_number = int(
-                num_match.group(1)
-            )
-
-            # -------------------------------------------------------
-            # ПРОВЕРЯЕМ ИМЕННО ID,
-            # А НЕ ТОЛЬКО НОМЕР ИГРЫ
-            # -------------------------------------------------------
-
-            has_prediction = False
-
-            for entry in predictions:
-
-                if (
-                    str(
-                        entry.get(
-                            "target_game_id"
-                        )
-                    ) == str(game_id)
-
-                    and entry.get(
-                        "status"
-                    ) == "pending"
-                ):
-
-                    has_prediction = True
-                    break
-
-            if has_prediction:
+            if not game_id or game_number is None:
 
                 print(
-                    f"⏭️ Прогноз на "
-                    f"ID={game_id} уже существует",
+                    "⚠️ Ожидание игры без "
+                    "корректного ID/#N — пропуск",
                     flush=True
                 )
 
                 continue
+
+            # =======================================================
+            # ОЖИДАНИЕ ДОЛЖНО ИМЕТЬ ХОТЯ БЫ ОДИН ТИП
+            #
+            # Например:
+            # #R #G #O
+            #
+            # создаст 3 независимых прогноза.
+            # =======================================================
+
+            if not tags:
+
+                print(
+                    f"⏭️ ID={game_id} "
+                    f"#N{game_number}: "
+                    f"нет #R/#G/#O/#X — прогноз НЕ даём",
+                    flush=True
+                )
+
+                continue
+
+            forecast_types = sorted(
+                tags
+            )
 
             print(
-                f"\n🆕 НОВЫЙ ID ИЗ КАНАЛА: "
+                f"\n🆕 НОВАЯ ИГРА: "
                 f"#N{game_number} | "
-                f"ID={game_id}",
+                f"ID={game_id} | "
+                f"ТИПЫ={forecast_types}",
                 flush=True
             )
 
             # =======================================================
-            # ГЛАВНАЯ ПРОВЕРКА
-            #
-            # ИДЁМ В API ПО ЭТОМУ ЖЕ ID
-            # И УБЕЖДАЕМСЯ, ЧТО ИГРА ЕЩЁ НЕ НАЧАЛАСЬ
+            # ПРОВЕРЯЕМ ID ОДИН РАЗ.
             # =======================================================
 
             if not check_target_game_before_prediction(
@@ -2099,16 +2686,78 @@ def process_telegram_updates(offset):
                 continue
 
             # =======================================================
-            # ЕСЛИ ID ЕСТЬ В API И КАРТ НЕТ —
-            # СТРОИМ ПРОГНОЗ ИМЕННО НА ЭТОТ ID
+            # ОТДЕЛЬНЫЙ ПРОГНОЗ НА КАЖДЫЙ ТЕГ
+            #
+            # #R #G #O -> 3 записи.
             # =======================================================
 
-            prediction = create_hybrid_prediction(
-                game_id,
-                game_number
-            )
+            for index, forecast_type in enumerate(
+                forecast_types
+            ):
 
-            if prediction:
+                # ---------------------------------------------------
+                # Проверяем дубль только этого типа.
+                #
+                # Поэтому:
+                # ID + R существует
+                # ID + G ещё нет
+                #
+                # G всё равно будет создан.
+                # ---------------------------------------------------
+
+                has_prediction = False
+
+                for entry in predictions:
+
+                    if (
+                        str(
+                            entry.get(
+                                "target_game_id"
+                            )
+                        ) == str(game_id)
+
+                        and str(
+                            entry.get(
+                                "prediction_type",
+                                ""
+                            )
+                        ).upper() == forecast_type
+
+                        and entry.get(
+                            "status"
+                        ) == "pending"
+                    ):
+
+                        has_prediction = True
+                        break
+
+                if has_prediction:
+
+                    print(
+                        f"⏭️ ID={game_id} "
+                        f"#{forecast_type} "
+                        f"уже существует",
+                        flush=True
+                    )
+
+                    continue
+
+                # ---------------------------------------------------
+                # Для первого типа cooldown работает как обычно.
+                # Для остальных типов ТОЙ ЖЕ ИГРЫ cooldown не мешает.
+                # ---------------------------------------------------
+
+                prediction = create_hybrid_prediction(
+                    game_id,
+                    game_number,
+                    forecast_type,
+                    skip_cooldown=(
+                        index > 0
+                    )
+                )
+
+                if not prediction:
+                    continue
 
                 message = make_prediction_message(
                     prediction
@@ -2135,6 +2784,7 @@ def process_telegram_updates(offset):
 
                     print(
                         f"📤 ОТПРАВЛЕНО: "
+                        f"#{forecast_type} | "
                         f"{prediction['predicted_card']} "
                         f"на #N{game_number} "
                         f"| ID={game_id}",
@@ -2179,7 +2829,7 @@ def check_predictions():
     print(
         f"🔍 Проверяем "
         f"{len(predictions)} прогнозов, "
-        f"кэш: {len(games_cache)}",
+        f"кэш: {len(games_cache)} номеров",
         flush=True
     )
 
@@ -2208,12 +2858,26 @@ def check_predictions():
             ""
         )
 
+        prediction_type = str(
+            entry.get(
+                "prediction_type",
+                ""
+            )
+        ).upper()
+
         if (
             not target
             or not predicted_cards
             or not msg_id
         ):
             continue
+
+        # Удаляем None из top-2.
+        predicted_cards = [
+            card
+            for card in predicted_cards
+            if card
+        ]
 
         found = None
 
@@ -2228,37 +2892,107 @@ def check_predictions():
                 dogon
             )
 
-            text = games_cache.get(
-                num
+            bucket = games_cache.get(
+                num,
+                []
             )
 
-            if not text:
+            # -------------------------------------------------------
+            # Старый формат кэша на случай,
+            # если что-то осталось от предыдущего запуска.
+            # -------------------------------------------------------
+
+            if isinstance(bucket, str):
+
+                bucket = [
+                    {
+                        "game_number": num,
+                        "game_id": None,
+                        "forecast_types": [],
+                        "cards": parse_cards_from_message(
+                            bucket
+                        ).get("cards", [])
+                        if parse_cards_from_message(
+                            bucket
+                        )
+                        else [],
+                        "text": bucket
+                    }
+                ]
+
+            if not bucket:
 
                 all_available = False
                 continue
 
-            parsed = parse_cards_from_message(
-                text
-            )
+            matching_records = []
 
-            if not parsed:
+            for result_game in bucket:
+
+                result_tags = normalize_forecast_tags(
+                    result_game.get(
+                        "forecast_types",
+                        []
+                    )
+                )
+
+                # ---------------------------------------------------
+                # Если прогноз типизированный,
+                # результат ОБЯЗАТЕЛЬНО должен иметь этот тег.
+                #
+                # Например:
+                # прогноз #G
+                # результат должен иметь #G.
+                # ---------------------------------------------------
+
+                if prediction_type:
+
+                    if prediction_type not in result_tags:
+                        continue
+
+                matching_records.append(
+                    result_game
+                )
+
+            # -------------------------------------------------------
+            # Если игры по номеру есть, но подходящей категории нет,
+            # это не повод сразу считать проигрыш.
+            #
+            # Может существовать другая игра/сообщение с этим ID
+            # или Telegram ещё не прислал нужный тег.
+            # -------------------------------------------------------
+
+            if not matching_records:
+
                 continue
 
-            actual_cards = parsed.get(
-                "cards",
-                []
-            )
+            for result_game in matching_records:
 
-            for card in predicted_cards:
+                actual_cards = result_game.get(
+                    "cards",
+                    []
+                )
 
-                if card in actual_cards:
+                for card in predicted_cards:
 
-                    found = {
-                        "num": num,
-                        "dogon": dogon,
-                        "card": card
-                    }
+                    if card in actual_cards:
 
+                        found = {
+                            "num": num,
+                            "dogon": dogon,
+                            "card": card,
+                            "game_id": result_game.get(
+                                "game_id"
+                            ),
+                            "forecast_types": result_game.get(
+                                "forecast_types",
+                                []
+                            )
+                        }
+
+                        break
+
+                if found:
                     break
 
             if found:
@@ -2276,6 +3010,17 @@ def check_predictions():
                 "num"
             ]
 
+            entry["result_game_id"] = found.get(
+                "game_id"
+            )
+
+            entry["result_forecast_types"] = (
+                found.get(
+                    "forecast_types",
+                    []
+                )
+            )
+
             entry["found_card"] = found[
                 "card"
             ]
@@ -2287,10 +3032,12 @@ def check_predictions():
             changed = True
 
             print(
-                f"✅ ЗАШЛО на "
-                f"#{found['num']} | "
+                f"✅ ЗАШЛО "
+                f"#{prediction_type or '?'} "
+                f"на #{found['num']} | "
                 f"догон {found['dogon']} | "
-                f"{found['card']}",
+                f"{found['card']} | "
+                f"ID={found.get('game_id')}",
                 flush=True
             )
 
@@ -2301,8 +3048,8 @@ def check_predictions():
                 )
 
                 lines[0] = (
-                    f"🎯 Игра: "
-                    f"#N{target} ✅"
+                    f"🎯 #{prediction_type or '?'} | "
+                    f"Игра: #N{target} ✅"
                 )
 
                 new_text = "\n".join(
@@ -2322,18 +3069,74 @@ def check_predictions():
             continue
 
         # -------------------------------------------------------------
-        # ЕЩЁ НЕ ВСЕ ИГРЫ ДОСТУПНЫ
+        # ВАЖНЫЙ МОМЕНТ:
+        #
+        # Нельзя считать lose только потому,
+        # что все номера #N уже есть.
+        #
+        # Для типизированного прогноза должны быть доступны
+        # результаты именно нужного типа.
         # -------------------------------------------------------------
 
-        if not all_available:
+        if prediction_type:
 
-            print(
-                f"⏳ Ожидание #{target} "
-                f"(не все догоны в кэше)",
-                flush=True
-            )
+            typed_games_count = 0
 
-            continue
+            for dogon in range(
+                DOGON_GAMES + 1
+            ):
+
+                num = add_game_offset(
+                    target,
+                    dogon
+                )
+
+                bucket = games_cache.get(
+                    num,
+                    []
+                )
+
+                for result_game in bucket:
+
+                    result_tags = normalize_forecast_tags(
+                        result_game.get(
+                            "forecast_types",
+                            []
+                        )
+                    )
+
+                    if prediction_type in result_tags:
+                        typed_games_count += 1
+                        break
+
+            if typed_games_count < DOGON_GAMES + 1:
+
+                print(
+                    f"⏳ Ожидание "
+                    f"#{prediction_type} "
+                    f"для #{target}: "
+                    f"есть не все игры "
+                    f"нужного типа",
+                    flush=True
+                )
+
+                continue
+
+        else:
+
+            # -------------------------------------------------------
+            # Совместимость со старыми прогнозами без типа.
+            # -------------------------------------------------------
+
+            if not all_available:
+
+                print(
+                    f"⏳ Ожидание #{target} "
+                    f"(не все догоны в кэше)",
+                    flush=True
+                )
+
+                continue
 
         # -------------------------------------------------------------
         # LOSE
@@ -2344,7 +3147,8 @@ def check_predictions():
         changed = True
 
         print(
-            f"❌ НЕ ЗАШЛО: "
+            f"❌ НЕ ЗАШЛО "
+            f"#{prediction_type or '?'}: "
             f"догоны 0-{DOGON_GAMES} "
             f"для #{target}",
             flush=True
@@ -2357,8 +3161,8 @@ def check_predictions():
             )
 
             lines[0] = (
-                f"🎯 Игра: "
-                f"#N{target} ❌"
+                f"🎯 #{prediction_type or '?'} | "
+                f"Игра: #N{target} ❌"
             )
 
             new_text = "\n".join(
@@ -2389,14 +3193,39 @@ def check_predictions():
 
 def create_hybrid_prediction(
     game_id,
-    game_number
+    game_number,
+    forecast_type,
+    skip_cooldown=False
 ):
     global last_prediction_time
 
     game_id = str(game_id)
 
+    forecast_type = str(
+        forecast_type
+    ).upper().lstrip("#")
+
+    if forecast_type not in FORECAST_TYPES:
+
+        print(
+            f"🚫 Неизвестный тип "
+            f"прогноза: {forecast_type}",
+            flush=True
+        )
+
+        return None
+
     # ---------------------------------------------------------------
-    # ПРОВЕРКА ДУБЛЯ ПО ID
+    # ПРОВЕРКА ДУБЛЯ ПО:
+    #
+    # ID + ТИП
+    #
+    # Поэтому:
+    #
+    # ID=123 + R
+    # ID=123 + G
+    #
+    # могут существовать одновременно.
     # ---------------------------------------------------------------
 
     for entry in predictions:
@@ -2408,13 +3237,21 @@ def create_hybrid_prediction(
                 )
             ) == game_id
 
+            and str(
+                entry.get(
+                    "prediction_type",
+                    ""
+                )
+            ).upper() == forecast_type
+
             and entry.get(
                 "status"
             ) == "pending"
         ):
 
             print(
-                f"⏭️ Прогноз на "
+                f"⏭️ Прогноз "
+                f"#{forecast_type} на "
                 f"ID={game_id} уже существует",
                 flush=True
             )
@@ -2423,22 +3260,29 @@ def create_hybrid_prediction(
 
     # ---------------------------------------------------------------
     # COOLDOWN
+    #
+    # Для нескольких типов одной игры:
+    # R -> G -> O
+    #
+    # cooldown не блокирует G/O.
     # ---------------------------------------------------------------
 
     now_ts = time.time()
 
-    if (
-        now_ts - last_prediction_time
-        < PREDICTION_COOLDOWN_SECONDS
-    ):
+    if not skip_cooldown:
 
-        print(
-            f"⏭️ Cooldown "
-            f"{PREDICTION_COOLDOWN_SECONDS} сек",
-            flush=True
-        )
+        if (
+            now_ts - last_prediction_time
+            < PREDICTION_COOLDOWN_SECONDS
+        ):
 
-        return None
+            print(
+                f"⏭️ Cooldown "
+                f"{PREDICTION_COOLDOWN_SECONDS} сек",
+                flush=True
+            )
+
+            return None
 
     # ---------------------------------------------------------------
     # ВРЕМЯ ПРОГНОЗА
@@ -2461,6 +3305,7 @@ def create_hybrid_prediction(
 
     print(
         f"🧠 HYBRID АНАЛИЗ | "
+        f"ТИП=#{forecast_type} | "
         f"ID={game_id} | "
         f"#N{game_number}",
         flush=True
@@ -2473,24 +3318,32 @@ def create_hybrid_prediction(
 
     # ---------------------------------------------------------------
     # HYBRID
+    #
+    # ВАЖНО:
+    # здесь передаём forecast_type.
+    #
+    # Поэтому #G не видит историю #R/#O.
     # ---------------------------------------------------------------
 
     result = build_hybrid_prediction(
         game_id,
-        timestamp_msk
+        timestamp_msk,
+        forecast_type
     )
 
     if not result:
 
         print(
-            "⏭️ Гибрид не дал результата",
+            f"⏭️ [{forecast_type}] "
+            f"Гибрид не дал результата",
             flush=True
         )
 
         return None
 
     print(
-        f"🥇 {result['card']} "
+        f"🥇 [{forecast_type}] "
+        f"{result['card']} "
         f"{result['probability']:.1%}",
         flush=True
     )
@@ -2522,7 +3375,8 @@ def create_hybrid_prediction(
     ):
 
         print(
-            "🚫 ПРОГНОЗ ОТМЕНЁН ФИЛЬТРОМ",
+            f"🚫 [{forecast_type}] "
+            f"ПРОГНОЗ ОТМЕНЁН ФИЛЬТРОМ",
             flush=True
         )
 
@@ -2536,6 +3390,13 @@ def create_hybrid_prediction(
         "target_game_id": game_id,
 
         "target_number": game_number,
+
+        # -----------------------------------------------------------
+        # НОВОЕ:
+        # конкретный тип прогноза.
+        # -----------------------------------------------------------
+
+        "prediction_type": forecast_type,
 
         "timestamp_msk": timestamp_msk,
 
@@ -2566,6 +3427,10 @@ def create_hybrid_prediction(
 
         "result_game": None,
 
+        "result_game_id": None,
+
+        "result_forecast_types": [],
+
         "found_card": None
     }
 
@@ -2582,6 +3447,7 @@ def create_hybrid_prediction(
 
     print(
         f"🔮 ПРОГНОЗ СОЗДАН: "
+        f"#{forecast_type} | "
         f"{result['card']} "
         f"для #N{game_number} "
         f"| ID={game_id}",
@@ -2850,8 +3716,14 @@ def build_game_from_cached_cards(
 
         game_number = get_game_number()
 
+    gid = str(gid)
+
+    tags = get_tags_for_game(
+        gid
+    )
+
     return {
-        "game_id": str(gid),
+        "game_id": gid,
 
         "timestamp": now.isoformat(),
 
@@ -2914,13 +3786,17 @@ def build_game_from_cached_cards(
             else None
         ),
 
-        "id_last_digit": str(gid)[-1],
+        "id_last_digit": gid[-1],
 
         "id_last_two": (
-            str(gid)[-2:]
-            if len(str(gid)) >= 2
+            gid[-2:]
+            if len(gid) >= 2
             else ""
-        )
+        ),
+
+        "forecast_types": tags,
+
+        "tags": tags
     }
 
 
@@ -2936,6 +3812,21 @@ def save_finished_game(
 ):
 
     if game_exists(gid):
+
+        # -----------------------------------------------------------
+        # Даже если игра уже сохранена API,
+        # проверяем, появились ли новые Telegram-теги.
+        # -----------------------------------------------------------
+
+        tags = get_tags_for_game(
+            gid
+        )
+
+        if tags:
+            attach_tags_to_history(
+                gid,
+                tags
+            )
 
         tracked_games.pop(
             str(gid),
@@ -2991,6 +3882,17 @@ def save_finished_game(
             ValueError
         ):
             pass
+
+    # ---------------------------------------------------------------
+    # На момент сохранения ещё раз смотрим Telegram ID -> tags.
+    # ---------------------------------------------------------------
+
+    tags = get_tags_for_game(
+        gid
+    )
+
+    parsed["forecast_types"] = tags
+    parsed["tags"] = tags
 
     ok = add_or_update_game(
         parsed
@@ -3183,6 +4085,26 @@ def cleanup_predictions():
         )
 
 
+def cleanup_games_cache():
+    """
+    Удаляем слишком старые номера из Telegram-кэша,
+    чтобы память не росла бесконечно.
+    """
+
+    if len(games_cache) <= 300:
+        return
+
+    numbers = sorted(
+        games_cache.keys()
+    )
+
+    for num in numbers[:-200]:
+        games_cache.pop(
+            num,
+            None
+        )
+
+
 # =====================================================================
 # MAIN
 # =====================================================================
@@ -3196,8 +4118,8 @@ def main():
     )
 
     print(
-        "🚀 БОТ — ПРОГНОЗЫ ПО ID ИЗ КАНАЛА "
-        "+ ИСТОРИЯ ИЗ API"
+        "🚀 БОТ — ПРОГНОЗЫ ПО ID + "
+        "РАЗДЕЛЕНИЕ #R/#G/#O/#X"
     )
 
     print(
@@ -3217,13 +4139,17 @@ def main():
     )
 
     print(
-        "📡 Источник прогнозов: "
-        "ТВОЙ КАНАЛ СТАТИСТИКИ"
+        "🏷️ Типы: #R | #G | #O | #X"
     )
 
     print(
-        f"📡 Источник истории: API | "
-        f"окно базы: {HISTORY_HOURS} часов"
+        "📡 Теги: Telegram | "
+        "карты/STATE: API"
+    )
+
+    print(
+        f"📡 Окно базы: "
+        f"{HISTORY_HOURS} часов"
     )
 
     print(
@@ -3327,7 +4253,7 @@ def main():
                     pass
 
             # =========================================================
-            # TELEGRAM — НОВЫЙ ID
+            # TELEGRAM — ID + ТЕГИ + ОЖИДАНИЕ
             # =========================================================
 
             offset = process_telegram_updates(
@@ -3345,6 +4271,8 @@ def main():
             # =========================================================
 
             cleanup_predictions()
+
+            cleanup_games_cache()
 
             cleanup_history_by_time()
 
