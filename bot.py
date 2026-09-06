@@ -4068,7 +4068,7 @@ def finalize_disappeared_games(active_ids):
             flush=True
         )
 
-                tracked_games.pop(gid, None)
+        tracked_games.pop(gid, None)
 
             continue
 
