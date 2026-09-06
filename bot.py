@@ -68,7 +68,7 @@ MIN_ID1_MATCHES = 3
 MIN_ID2_MATCHES = 2
 MIN_SEQUENCE_MATCHES = 2
 
-MIN_FORECAST_PROBABILITY = 0.17
+MIN_FORECAST_PROBABILITY = 0.10
 MIN_LEADER_GAP = 0.01
 MIN_ACTIVE_METHODS = 1
 
@@ -1132,7 +1132,7 @@ def process_telegram_updates(offset):
 
                 if id_match and num_match:
                     game_id = id_match.group(1)
-                    game_number = int(num_match.group(1)) + 10  # 👈 СДВИГ +10
+                    game_number = int(num_match.group(1))
 
                     # Проверяем, есть ли уже прогноз на этот номер
                     has_prediction = False
