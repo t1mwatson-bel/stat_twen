@@ -3963,97 +3963,181 @@ def process_game(active_game):
 # =====================================================================
 
 def finalize_disappeared_games(active_ids):
-    """
-    Обрабатывает игры, которые исчезли из активного feed.
 
-    Логика:
-    - STATE=4 → сохраняем из кэша.
-    - STATE=5 → сохраняем из кэша.
-    - STATE=3 + есть карты P1 и P2 → тоже сохраняем из кэша на всякий случай.
-    - Если финальное состояние получить не удалось → игру не сохраняем.
-    """
+    for gid in list(tracked_games.keys()):
 
-    disappeared = [
-        gid for gid in list(tracked_games.keys())
-        if gid not in active_ids
-    ]
-
-    for gid in disappeared:
-        info = tracked_games.get(gid)
-
-        if not info:
+        if (
+            gid in active_ids
+            or game_exists(gid)
+        ):
             continue
 
-        last_state = str(info.get("state", ""))
+        info = tracked_games.get(
+            gid,
+            {}
+        )
 
-        player = info.get("player", []) or []
-        dealer = info.get("dealer", []) or []
+        last_state = str(
+            info.get(
+                "last_state",
+                ""
+            )
+        )
+
+        player = (
+            info.get(
+                "player",
+                []
+            )
+            or []
+        )
+
+        dealer = (
+            info.get(
+                "dealer",
+                []
+            )
+            or []
+        )
+
+        # =========================================================
+        # STATE=3 / STATE=4
+        #
+        # Игра исчезла из feed, но последние карты уже были
+        # получены и лежат в tracked_games.
+        # Сохраняем последнюю известную версию игры из кэша.
+        # =========================================================
+
+        if last_state in {"3", "4"}:
+
+            print(
+                f"🏁 ID={gid} исчезла "
+                f"после STATE={last_state} — "
+                f"сохраняем последний кэш "
+                f"P1={len(player)} "
+                f"| P2={len(dealer)}",
+                flush=True
+            )
+
+            if save_finished_game(
+                gid,
+                from_cache=True
+            ):
+
+                print(
+                    f"✅ ID={gid} сохранена "
+                    f"из кэша STATE={last_state}",
+                    flush=True
+                )
+
+            else:
+
+                print(
+                    f"⚠️ ID={gid} "
+                    f"не удалось сохранить "
+                    f"из кэша STATE={last_state}",
+                    flush=True
+                )
+
+            continue
+
+        # =========================================================
+        # ЕСЛИ STATE НЕ УСПЕЛ ЗАФИКСИРОВАТЬСЯ —
+        # ДЕЛАЕМ ДОПОЛНИТЕЛЬНЫЕ ЗАПРОСЫ
+        # =========================================================
+
+        attempts = int(
+            info.get(
+                "final_attempts",
+                0
+            )
+        )
+
+        if attempts >= 3:
+
+            print(
+                f"⚠️ ID={gid} исчезла "
+                f"с последним STATE={last_state}; "
+                f"финального STATE=3/4/5 нет",
+                flush=True
+            )
+
+            tracked_games.pop(
+                gid,
+                None
+            )
+
+            continue
+
+        info["final_attempts"] = (
+            attempts + 1
+        )
 
         print(
-            f"🎮 ID={gid} | STATE={last_state} | "
-            f"P1={len(player)} | P2={len(dealer)} | финальная проверка",
+            f"🔄 Финальная попытка "
+            f"{info['final_attempts']}/3 "
+            f"для ID={gid} "
+            f"| последний STATE={last_state or 'нет'}",
             flush=True
         )
 
-        # ============================================================
-        # STATE=4 — сохраняем из кэша
-        # ============================================================
+        result = inspect_game_state(
+            gid,
+            final_attempt=True
+        )
 
-        if last_state == "4":
+        if not result:
+            continue
+
+        raw, state = result
+
+        # =========================================================
+        # STATE=5 — полноценное сохранение из API
+        # =========================================================
+
+        if str(state) == "5":
+
             print(
-                f"🏁 ID={gid} исчезла после STATE=4 — сохраняем из кэша",
+                f"🏁 ID={gid} найдена "
+                f"завершённой после исчезновения "
+                f"(STATE=5)",
                 flush=True
             )
 
-            if save_finished_game(gid, from_cache=True):
-                print(
-                    f"✅ ID={gid} сохранена из кэша STATE=4",
-                    flush=True
-                )
-
-            tracked_games.pop(gid, None)
-            continue
-
-        # ============================================================
-        # STATE=5 — сохраняем из кэша
-        # ============================================================
-
-        if last_state == "5":
-            print(
-                f"🏁 ID={gid} исчезла после STATE=5 — сохраняем из кэша",
-                flush=True
+            save_finished_game(
+                gid,
+                raw
             )
 
-            if save_finished_game(gid, from_cache=True):
-                print(
-                    f"✅ ID={gid} сохранена из кэша STATE=5",
-                    flush=True
-                )
+        # =========================================================
+        # STATE=3 / STATE=4
+        # Запоминаем состояние и карты.
+        # На следующем исчезновении сохраним из кэша.
+        # =========================================================
 
-            tracked_games.pop(gid, None)
-            continue
+        elif str(state) in {"3", "4"}:
 
-        # ============================================================
-        # STATE=3 — запасной вариант
-        #
-        # Если игра исчезла на STATE=3, но у нас уже есть
-        # полноценные карты P1 и P2, сохраняем её из кэша.
-        # ============================================================
+            info["last_state"] = str(
+                state
+            )
 
-        if last_state == "3":
-            if player and dealer:
-                print(
-                    f"🏁 ID={gid} исчезла после STATE=3 "
-                    f"с полными картами — сохраняем из кэша "
-                    f"P1={len(player)} | P2={len(dealer)}",
-                    flush=True
-                )
+            player, dealer, _ = extract_game_sc(
+                raw
+            )
 
-                if save_finished_game(gid, from_cache=True):
-                    print(
-                        f"✅ ID={gid} сохранена из кэша STATE=3",
-                        flush=True
-                    )
+            if player:
+                info["player"] = player
+
+            if dealer:
+                info["dealer"] = dealer
+
+            print(
+                f"📌 ID={gid} финально "
+                f"зафиксирована STATE={state} "
+                f"| P1={len(info.get('player', []))} "
+                f"| P2={len(info.get('dealer', []))}",
+                flush=True
+            )
 
                 tracked_games.pop(gid, None)
                 continue
