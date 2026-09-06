@@ -1082,13 +1082,47 @@ def process_telegram_updates(offset):
             timeout=10,
         )
 
-        data = response.json()
+                data = response.json()
+
         if not data.get("ok"):
             print(f"❌ Ошибка Telegram API: {data}")
             return offset
 
         updates = data.get("result", [])
         print(f"📥 Получено обновлений: {len(updates)}")
+        print(
+            f"🔍 RAW RESPONSE: {json.dumps(data, ensure_ascii=False)[:3000]}",
+            flush=True
+        )
+
+        for update in updates:
+            print("🔥 UPDATE TYPE:", list(update.keys()), flush=True)
+            print(
+                "🔥 RAW UPDATE:",
+                json.dumps(update, ensure_ascii=False, indent=2)[:5000],
+                flush=True
+            )
+
+            update_id = update.get("update_id")
+            if update_id is not None:
+                offset = update_id + 1
+                save_offset(offset)
+
+            post = update.get("channel_post") or update.get("edited_channel_post")
+            if not post:
+                continue
+
+            chat_id = str(post.get("chat", {}).get("id", ""))
+
+            print(f"📩 CHAT ID сообщения: {chat_id}", flush=True)
+            print(f"📩 НУЖНЫЙ CHANNEL_STATS: {CHANNEL_STATS}", flush=True)
+
+            if chat_id != str(CHANNEL_STATS):
+                print("⏭️ Сообщение из другого канала", flush=True)
+                continue
+
+            text = post.get("text", "")
+            print(f"📩 Сообщение из канала: {text[:200]}...")
 
         for update in updates:
             update_id = update.get("update_id")
