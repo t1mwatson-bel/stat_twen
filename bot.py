@@ -1132,7 +1132,7 @@ def process_telegram_updates(offset):
 
                 if id_match and num_match:
                     game_id = id_match.group(1)
-                    game_number = int(num_match.group(1)) +10
+                    game_number = int(num_match.group(1)) + 10  # 👈 СДВИГ +10
 
                     # Проверяем, есть ли уже прогноз на этот номер
                     has_prediction = False
