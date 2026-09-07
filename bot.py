@@ -4,7 +4,12 @@ import time
 import sqlite3
 import logging
 import traceback
-from datetime import datetime, timedelta, timezone
+
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 
 import requests
 
@@ -15,7 +20,7 @@ import requests
 
 BASE_URL = "https://api.binarium.com"
 
-# Твой Asset ID
+# Asset ID
 ASSET_ID = 43
 
 # Интервал свечей
@@ -49,30 +54,27 @@ MAX_RETRIES = 3
 # АНАЛИЗ ПАТТЕРНОВ
 # =====================================================================
 
-# Сколько последних свечей составляют паттерн
-PATTERN_LENGTH = 8
+# Сколько последних ЗАКРЫТЫХ свечей составляют паттерн
+PATTERN_LENGTH = 6
 
 # Минимальное количество похожих паттернов
-MIN_MATCHES = 5
+MIN_MATCHES = 4
 
 # Сколько свечей минимум нужно накопить перед анализом
 MIN_CANDLES_FOR_ANALYSIS = 500
 
 # Минимальная вероятность для сигнала
-MIN_CONFIDENCE = 60.0
-
-# Не искать паттерн слишком близко к текущему
-EXCLUDE_LAST = PATTERN_LENGTH + 2
+MIN_CONFIDENCE = 58.0
 
 
 # =====================================================================
 # ЭКСПИРАЦИЯ
 # =====================================================================
 
-# Свеча = 5 секунд
+# Продолжительность одной свечи
 CANDLE_SECONDS = 5
 
-# Экспирация сигнала = 30 секунд
+# Экспирация сигнала
 EXPIRATION_SECONDS = 30
 
 # Через сколько свечей проверять результат
@@ -87,10 +89,16 @@ EXPIRATION_CANDLES = (
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(message)s"
+    ),
 )
 
-logger = logging.getLogger("BINARIUM")
+logger = logging.getLogger(
+    "BINARIUM"
+)
 
 
 # =====================================================================
@@ -108,7 +116,11 @@ session.headers.update(
             "(KHTML, like Gecko) "
             "Chrome/150.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
+        "Accept": (
+            "application/json, "
+            "text/plain, "
+            "*/*"
+        ),
         "Referer": "https://binarium.com/",
         "Origin": "https://binarium.com",
         "Connection": "keep-alive",
@@ -117,17 +129,90 @@ session.headers.update(
 
 
 # =====================================================================
+# TIME
+# =====================================================================
+
+def utc_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def format_api_time(dt):
+
+    dt = dt.astimezone(
+        timezone.utc
+    )
+
+    return dt.strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+
+def parse_api_time(value):
+
+    if not value:
+        return None
+
+    value = str(
+        value
+    ).strip()
+
+    if value.endswith("Z"):
+
+        value = (
+            value[:-1]
+            + "+00:00"
+        )
+
+    try:
+
+        dt = datetime.fromisoformat(
+            value
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            timezone.utc
+        )
+
+    except Exception:
+
+        return None
+
+
+def timestamp_from_api_time(value):
+
+    dt = parse_api_time(
+        value
+    )
+
+    if dt is None:
+        return 0.0
+
+    return dt.timestamp()
+
+
+# =====================================================================
 # DATABASE
 # =====================================================================
 
 def init_database():
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(
+        DB_FILE
+    )
 
     cursor = conn.cursor()
 
     # -------------------------------------------------------------
-    # СВЕЧИ
+    # CANDLES
     # -------------------------------------------------------------
 
     cursor.execute(
@@ -153,7 +238,7 @@ def init_database():
     )
 
     # -------------------------------------------------------------
-    # СИГНАЛЫ
+    # SIGNALS
     # -------------------------------------------------------------
 
     cursor.execute(
@@ -197,77 +282,20 @@ def init_database():
         """
     )
 
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signals_timestamp
+        ON signals(signal_timestamp)
+        """
+    )
+
     conn.commit()
     conn.close()
 
     logger.info(
-        f"✅ База данных готова: {DB_FILE}"
+        f"✅ База данных готова: "
+        f"{DB_FILE}"
     )
-
-
-# =====================================================================
-# TIME
-# =====================================================================
-
-def utc_now():
-
-    return datetime.now(
-        timezone.utc
-    )
-
-
-def format_api_time(dt):
-
-    dt = dt.astimezone(
-        timezone.utc
-    )
-
-    return dt.strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
-
-
-def parse_api_time(value):
-
-    if not value:
-        return None
-
-    value = str(value).strip()
-
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-
-    try:
-
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
-
-        return dt.astimezone(
-            timezone.utc
-        )
-
-    except Exception:
-
-        return None
-
-
-def timestamp_from_api_time(value):
-
-    dt = parse_api_time(
-        value
-    )
-
-    if dt is None:
-        return 0.0
-
-    return dt.timestamp()
 
 
 # =====================================================================
@@ -276,7 +304,7 @@ def timestamp_from_api_time(value):
 
 def request_candles(
     start_dt,
-    end_dt
+    end_dt,
 ):
 
     url = (
@@ -297,7 +325,7 @@ def request_candles(
 
     for attempt in range(
         1,
-        MAX_RETRIES + 1
+        MAX_RETRIES + 1,
     ):
 
         try:
@@ -323,7 +351,8 @@ def request_candles(
             if response.status_code != 200:
 
                 logger.warning(
-                    f"⚠️ HTTP {response.status_code}"
+                    f"⚠️ HTTP "
+                    f"{response.status_code}"
                 )
 
                 if attempt < MAX_RETRIES:
@@ -363,7 +392,7 @@ def request_candles(
 
             if not isinstance(
                 data,
-                list
+                list,
             ):
 
                 logger.warning(
@@ -418,7 +447,7 @@ def normalize_candles(raw_candles):
 
         if not isinstance(
             item,
-            dict
+            dict,
         ):
             continue
 
@@ -450,7 +479,7 @@ def normalize_candles(raw_candles):
         except (
             KeyError,
             TypeError,
-            ValueError
+            ValueError,
         ):
 
             continue
@@ -474,6 +503,10 @@ def normalize_candles(raw_candles):
             }
         )
 
+    result.sort(
+        key=lambda x: x["timestamp"]
+    )
+
     return result
 
 
@@ -492,11 +525,27 @@ def save_candles(candles):
 
     cursor = conn.cursor()
 
-    saved = 0
+    new_saved = 0
 
     try:
 
         for candle in candles:
+
+            cursor.execute(
+                """
+                SELECT 1
+                FROM candles
+                WHERE asset_id = ?
+                AND time = ?
+                LIMIT 1
+                """,
+                (
+                    candle["asset_id"],
+                    candle["time"],
+                ),
+            )
+
+            exists = cursor.fetchone()
 
             cursor.execute(
                 """
@@ -522,7 +571,8 @@ def save_candles(candles):
                 ),
             )
 
-            saved += 1
+            if not exists:
+                new_saved += 1
 
         conn.commit()
 
@@ -530,7 +580,7 @@ def save_candles(candles):
 
         conn.close()
 
-    return saved
+    return new_saved
 
 
 # =====================================================================
@@ -572,14 +622,14 @@ def get_database_stats():
         )
 
     return (
-        row[0],
+        row[0] or 0,
         row[1],
         row[2],
     )
 
 
 # =====================================================================
-# LOAD CANDLES FROM DATABASE
+# LOAD CANDLES
 # =====================================================================
 
 def load_candles_from_database():
@@ -636,7 +686,9 @@ def load_candles_from_database():
 
 def download_history():
 
-    count, _, _ = get_database_stats()
+    count, _, _ = (
+        get_database_stats()
+    )
 
     if count > 0:
 
@@ -649,7 +701,9 @@ def download_history():
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("📥 ПЕРВАЯ ЗАГРУЗКА ИСТОРИИ")
+    logger.info(
+        "📥 ПЕРВАЯ ЗАГРУЗКА ИСТОРИИ"
+    )
     logger.info("=" * 70)
 
     end_dt = utc_now()
@@ -688,7 +742,7 @@ def download_history():
 
         raw = request_candles(
             current,
-            chunk_end
+            chunk_end,
         )
 
         candles = normalize_candles(
@@ -702,7 +756,8 @@ def download_history():
         total_saved += saved
 
         logger.info(
-            f"💾 Сохранено: {saved}"
+            f"💾 Новых свечей: "
+            f"{saved}"
         )
 
         current = chunk_end
@@ -712,10 +767,10 @@ def download_history():
     logger.info("")
     logger.info("=" * 70)
     logger.info(
-        f"✅ ИСТОРИЯ ЗАГРУЖЕНА"
+        "✅ ИСТОРИЯ ЗАГРУЖЕНА"
     )
     logger.info(
-        f"💾 Всего обработано: "
+        f"💾 Всего новых: "
         f"{total_saved}"
     )
     logger.info("=" * 70)
@@ -738,7 +793,7 @@ def update_recent_candles():
 
     raw = request_candles(
         start_dt,
-        end_dt
+        end_dt,
     )
 
     if not raw:
@@ -758,6 +813,42 @@ def update_recent_candles():
     )
 
     return saved
+
+
+# =====================================================================
+# CLOSED CANDLES
+# =====================================================================
+
+def get_closed_candles(candles):
+
+    if not candles:
+        return []
+
+    now_timestamp = time.time()
+
+    closed = []
+
+    for candle in candles:
+
+        timestamp = candle.get(
+            "timestamp"
+        )
+
+        if timestamp is None:
+            continue
+
+        candle_close_time = (
+            timestamp
+            + CANDLE_SECONDS
+        )
+
+        if candle_close_time <= now_timestamp:
+
+            closed.append(
+                candle
+            )
+
+    return closed
 
 
 # =====================================================================
@@ -840,7 +931,7 @@ def pattern_to_text(pattern):
 
 def find_pattern_matches(
     directions,
-    pattern
+    pattern,
 ):
 
     matches = []
@@ -849,18 +940,30 @@ def find_pattern_matches(
         pattern
     )
 
-    search_end = (
-        len(directions)
-        - EXCLUDE_LAST
+    total_directions = len(
+        directions
     )
 
-    if search_end <= pattern_length:
+    # Последний индекс, который можно использовать
+    # Историческое совпадение не должно пересекаться
+    # с текущим паттерном
+    current_pattern_start = (
+        total_directions
+        - pattern_length
+    )
 
+    # i = индекс следующей свечи после исторического паттерна
+    max_search_index = (
+        current_pattern_start
+        - 1
+    )
+
+    if max_search_index <= pattern_length:
         return matches
 
     for i in range(
         pattern_length,
-        search_end
+        max_search_index + 1,
     ):
 
         historical_pattern = directions[
@@ -868,7 +971,6 @@ def find_pattern_matches(
         ]
 
         if historical_pattern != pattern:
-
             continue
 
         next_direction = directions[i]
@@ -877,7 +979,6 @@ def find_pattern_matches(
             "UP",
             "DOWN",
         ):
-
             continue
 
         matches.append(
@@ -896,19 +997,36 @@ def find_pattern_matches(
 
 def analyze_pattern(candles):
 
-    if len(candles) < MIN_CANDLES_FOR_ANALYSIS:
+    closed_candles = get_closed_candles(
+        candles
+    )
+
+    if (
+        len(closed_candles)
+        < MIN_CANDLES_FOR_ANALYSIS
+    ):
 
         return None
 
     directions = build_directions(
-        candles
+        closed_candles
     )
+
+    if (
+        len(directions)
+        < PATTERN_LENGTH + 2
+    ):
+
+        return None
 
     current_pattern = directions[
         -PATTERN_LENGTH:
     ]
 
-    if len(current_pattern) < PATTERN_LENGTH:
+    if (
+        len(current_pattern)
+        < PATTERN_LENGTH
+    ):
 
         return None
 
@@ -918,11 +1036,27 @@ def analyze_pattern(candles):
 
     if "FLAT" in current_pattern:
 
-        return None
+        return {
+            "pattern": current_pattern,
+            "matches": 0,
+            "up": 0,
+            "down": 0,
+            "up_probability": 0.0,
+            "down_probability": 0.0,
+            "prediction": None,
+            "confidence": 0.0,
+            "reason": (
+                "В текущем паттерне "
+                "есть FLAT-свеча"
+            ),
+            "signal_candle": (
+                closed_candles[-1]
+            ),
+        }
 
     matches = find_pattern_matches(
         directions,
-        current_pattern
+        current_pattern,
     )
 
     up_count = sum(
@@ -942,6 +1076,10 @@ def analyze_pattern(candles):
         + down_count
     )
 
+    signal_candle = (
+        closed_candles[-1]
+    )
+
     if total < MIN_MATCHES:
 
         return {
@@ -953,6 +1091,11 @@ def analyze_pattern(candles):
             "down_probability": 0.0,
             "prediction": None,
             "confidence": 0.0,
+            "reason": (
+                f"Недостаточно совпадений: "
+                f"{total}/{MIN_MATCHES}"
+            ),
+            "signal_candle": signal_candle,
         }
 
     up_probability = (
@@ -969,6 +1112,7 @@ def analyze_pattern(candles):
 
     prediction = None
     confidence = 0.0
+    reason = ""
 
     if up_probability > down_probability:
 
@@ -980,9 +1124,34 @@ def analyze_pattern(candles):
         prediction = "DOWN"
         confidence = down_probability
 
-    if confidence < MIN_CONFIDENCE:
+    else:
+
+        reason = (
+            "Вероятности UP и DOWN равны"
+        )
+
+    if (
+        prediction
+        and confidence < MIN_CONFIDENCE
+    ):
+
+        reason = (
+            f"Уверенность {confidence:.1f}% "
+            f"ниже минимума "
+            f"{MIN_CONFIDENCE}%"
+        )
 
         prediction = None
+
+    if (
+        prediction
+        and not reason
+    ):
+
+        reason = (
+            "Сигнал соответствует "
+            "всем условиям"
+        )
 
     return {
         "pattern": current_pattern,
@@ -993,11 +1162,13 @@ def analyze_pattern(candles):
         "down_probability": down_probability,
         "prediction": prediction,
         "confidence": confidence,
+        "reason": reason,
+        "signal_candle": signal_candle,
     }
 
 
 # =====================================================================
-# CHECK DUPLICATE SIGNAL
+# CHECK ACTIVE SIGNAL
 # =====================================================================
 
 def has_active_signal():
@@ -1024,12 +1195,45 @@ def has_active_signal():
 
 
 # =====================================================================
+# CHECK SIGNAL FOR SAME CANDLE
+# =====================================================================
+
+def signal_exists_for_candle(
+    signal_timestamp,
+):
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM signals
+        WHERE signal_timestamp = ?
+        LIMIT 1
+        """,
+        (
+            signal_timestamp,
+        ),
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+# =====================================================================
 # SAVE SIGNAL
 # =====================================================================
 
 def save_signal(
     result,
-    candle
+    candle,
 ):
 
     prediction = result.get(
@@ -1040,6 +1244,29 @@ def save_signal(
         "UP",
         "DOWN",
     ):
+
+        return False
+
+    signal_timestamp = candle.get(
+        "timestamp"
+    )
+
+    if signal_timestamp is None:
+
+        logger.warning(
+            "⚠️ У свечи нет timestamp"
+        )
+
+        return False
+
+    if signal_exists_for_candle(
+        signal_timestamp
+    ):
+
+        logger.info(
+            "⏭️ Для этой свечи "
+            "сигнал уже создавался"
+        )
 
         return False
 
@@ -1056,18 +1283,22 @@ def save_signal(
         "time"
     )
 
-    signal_timestamp = candle.get(
-        "timestamp"
-    )
-
     entry_price = candle.get(
         "close"
     )
 
+    if entry_price is None:
+
+        logger.warning(
+            "⚠️ У свечи нет цены close"
+        )
+
+        return False
+
     pattern_text = ",".join(
         result.get(
             "pattern",
-            []
+            [],
         )
     )
 
@@ -1077,41 +1308,68 @@ def save_signal(
 
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        INSERT INTO signals (
-            signal_time,
-            signal_timestamp,
-            entry_price,
-            prediction,
-            confidence,
-            matches,
-            up_count,
-            down_count,
-            pattern,
-            expiration_seconds,
-            checked
+    try:
+
+        cursor.execute(
+            """
+            INSERT INTO signals (
+                signal_time,
+                signal_timestamp,
+                entry_price,
+                prediction,
+                confidence,
+                matches,
+                up_count,
+                down_count,
+                pattern,
+                expiration_seconds,
+                checked
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
+            )
+            """,
+            (
+                signal_time,
+                signal_timestamp,
+                entry_price,
+                prediction,
+                result.get(
+                    "confidence",
+                    0.0,
+                ),
+                result.get(
+                    "matches",
+                    0,
+                ),
+                result.get(
+                    "up",
+                    0,
+                ),
+                result.get(
+                    "down",
+                    0,
+                ),
+                pattern_text,
+                EXPIRATION_SECONDS,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        """,
-        (
-            signal_time,
-            signal_timestamp,
-            entry_price,
-            prediction,
-            result.get("confidence", 0.0),
-            result.get("matches", 0),
-            result.get("up", 0),
-            result.get("down", 0),
-            pattern_text,
-            EXPIRATION_SECONDS,
-        ),
-    )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    return True
+        return True
+
+    except Exception:
+
+        logger.exception(
+            "❌ Ошибка сохранения сигнала"
+        )
+
+        return False
+
+    finally:
+
+        conn.close()
 
 
 # =====================================================================
@@ -1120,7 +1378,7 @@ def save_signal(
 
 def print_signal(
     result,
-    candle
+    candle,
 ):
 
     prediction = result.get(
@@ -1140,7 +1398,7 @@ def print_signal(
     logger.info("=" * 65)
 
     logger.info(
-        f"🕯 Время: "
+        f"🕯 Закрытая свеча: "
         f"{candle.get('time')}"
     )
 
@@ -1191,6 +1449,11 @@ def print_signal(
     )
 
     logger.info(
+        f"📊 Основание: "
+        f"{result.get('reason')}"
+    )
+
+    logger.info(
         f"⏱ Экспирация: "
         f"{EXPIRATION_SECONDS} секунд"
     )
@@ -1199,23 +1462,30 @@ def print_signal(
 
 
 # =====================================================================
-# CHECK SIGNALS
+# CHECK PENDING SIGNALS
 # =====================================================================
 
 def check_pending_signals(candles):
 
     if not candles:
-
         return
 
-    latest_candle = candles[-1]
+    closed_candles = get_closed_candles(
+        candles
+    )
+
+    if not closed_candles:
+        return
+
+    latest_candle = (
+        closed_candles[-1]
+    )
 
     latest_timestamp = latest_candle.get(
         "timestamp"
     )
 
     if latest_timestamp is None:
-
         return
 
     conn = sqlite3.connect(
@@ -1245,6 +1515,7 @@ def check_pending_signals(candles):
     if not signals:
 
         conn.close()
+
         return
 
     for signal in signals:
@@ -1263,45 +1534,50 @@ def check_pending_signals(candles):
         )
 
         if latest_timestamp < expiration_timestamp:
-
             continue
 
         cursor.execute(
             """
             SELECT
                 time,
+                timestamp,
                 close
             FROM candles
             WHERE asset_id = ?
             AND timestamp >= ?
+            AND timestamp + ? <= ?
             ORDER BY timestamp ASC
             LIMIT 1
             """,
             (
                 ASSET_ID,
                 expiration_timestamp,
+                CANDLE_SECONDS,
+                time.time(),
             ),
         )
 
         exit_row = cursor.fetchone()
 
         if not exit_row:
-
             continue
 
         exit_time = exit_row[0]
-        exit_price = exit_row[1]
+        exit_timestamp = exit_row[1]
+        exit_price = exit_row[2]
 
         result = "LOSE"
 
         if prediction == "UP":
 
             if exit_price > entry_price:
+
                 result = "WIN"
 
         elif prediction == "DOWN":
 
             if exit_price < entry_price:
+
                 result = "WIN"
 
         cursor.execute(
@@ -1340,8 +1616,17 @@ def check_pending_signals(candles):
         )
 
         logger.info(
-            f"💰 Цена через "
-            f"{expiration_seconds} сек: "
+            f"⏰ Экспирация: "
+            f"{expiration_seconds} сек"
+        )
+
+        logger.info(
+            f"🕯 Свеча проверки: "
+            f"{exit_time}"
+        )
+
+        logger.info(
+            f"💰 Цена выхода: "
             f"{exit_price}"
         )
 
@@ -1428,7 +1713,11 @@ def print_statistics():
         )
 
     logger.info("")
-    logger.info("📊 СТАТИСТИКА СИГНАЛОВ")
+    logger.info("=" * 65)
+    logger.info(
+        "📊 СТАТИСТИКА СИГНАЛОВ"
+    )
+    logger.info("=" * 65)
 
     logger.info(
         f"🎯 Всего: {total}"
@@ -1447,6 +1736,8 @@ def print_statistics():
         f"{accuracy:.2f}%"
     )
 
+    logger.info("=" * 65)
+
 
 # =====================================================================
 # CURRENT ANALYSIS
@@ -1454,11 +1745,9 @@ def print_statistics():
 
 def print_current_analysis(
     result,
-    candles
 ):
 
     if not result:
-
         return
 
     logger.info("")
@@ -1468,6 +1757,17 @@ def print_current_analysis(
         f"🧩 Текущий паттерн: "
         f"{pattern_to_text(result['pattern'])}"
     )
+
+    signal_candle = result.get(
+        "signal_candle"
+    )
+
+    if signal_candle:
+
+        logger.info(
+            f"🕯 Последняя закрытая: "
+            f"{signal_candle.get('time')}"
+        )
 
     logger.info(
         f"🔎 Найдено совпадений: "
@@ -1491,14 +1791,29 @@ def print_current_analysis(
     if result.get("prediction"):
 
         logger.info(
-            f"🎯 Возможный сигнал: "
+            f"🎯 ВОЗМОЖНЫЙ СИГНАЛ: "
             f"{result['prediction']}"
+        )
+
+        logger.info(
+            f"📊 Уверенность: "
+            f"{result['confidence']:.1f}%"
         )
 
     else:
 
         logger.info(
-            "⏭️ Сигнал пока не подходит"
+            "⏭️ Сигнал не подходит"
+        )
+
+    reason = result.get(
+        "reason"
+    )
+
+    if reason:
+
+        logger.info(
+            f"ℹ️ Причина: {reason}"
         )
 
     logger.info("-" * 65)
@@ -1512,10 +1827,14 @@ def main():
 
     logger.info("")
     logger.info("=" * 70)
-    logger.info("🤖 BINARIUM AUTO ANALYZER")
+    logger.info(
+        "🤖 BINARIUM AUTO ANALYZER"
+    )
     logger.info("=" * 70)
 
-    logger.info("Режим:")
+    logger.info(
+        "⚙️ РЕЖИМ РАБОТЫ:"
+    )
 
     logger.info(
         f"🕯 Интервал свечи: "
@@ -1528,11 +1847,6 @@ def main():
     )
 
     logger.info(
-        f"⏱ Экспирация: "
-        f"{EXPIRATION_SECONDS} секунд"
-    )
-
-    logger.info(
         f"🎯 Минимум совпадений: "
         f"{MIN_MATCHES}"
     )
@@ -1540,6 +1854,11 @@ def main():
     logger.info(
         f"📊 Минимальная уверенность: "
         f"{MIN_CONFIDENCE}%"
+    )
+
+    logger.info(
+        f"⏱ Экспирация: "
+        f"{EXPIRATION_SECONDS} секунд"
     )
 
     # -------------------------------------------------------------
@@ -1563,19 +1882,26 @@ def main():
     )
 
     logger.info("")
+
     logger.info(
-        f"📚 Свечей в базе: {count}"
+        f"📚 Свечей в базе: "
+        f"{count}"
     )
 
     logger.info(
-        f"🕐 Первая: {first_time}"
+        f"🕐 Первая: "
+        f"{first_time}"
     )
 
     logger.info(
-        f"🕐 Последняя: {last_time}"
+        f"🕐 Последняя: "
+        f"{last_time}"
     )
 
     cycle = 0
+
+    # Последняя свеча, для которой уже выполнялся анализ
+    last_analyzed_timestamp = None
 
     # -------------------------------------------------------------
     # MAIN LOOP
@@ -1608,7 +1934,7 @@ def main():
             )
 
             logger.info(
-                f"💾 Сохранено/обновлено: "
+                f"💾 Новых свечей: "
                 f"{saved}"
             )
 
@@ -1626,7 +1952,21 @@ def main():
             # LOAD
             # -----------------------------------------------------
 
-            candles = load_candles_from_database()
+            candles = (
+                load_candles_from_database()
+            )
+
+            if not candles:
+
+                logger.warning(
+                    "⚠️ В базе нет свечей"
+                )
+
+                time.sleep(
+                    UPDATE_INTERVAL
+                )
+
+                continue
 
             # -----------------------------------------------------
             # CHECK OLD SIGNALS
@@ -1637,23 +1977,62 @@ def main():
             )
 
             # -----------------------------------------------------
-            # WAIT FOR DATA
+            # GET CLOSED CANDLES
             # -----------------------------------------------------
 
-            if len(candles) < MIN_CANDLES_FOR_ANALYSIS:
+            closed_candles = (
+                get_closed_candles(
+                    candles
+                )
+            )
+
+            if (
+                len(closed_candles)
+                < MIN_CANDLES_FOR_ANALYSIS
+            ):
 
                 remaining = (
                     MIN_CANDLES_FOR_ANALYSIS
-                    - len(candles)
+                    - len(closed_candles)
                 )
 
                 logger.info(
-                    f"⏳ Накопление данных..."
+                    "⏳ Накопление данных..."
                 )
 
                 logger.info(
                     f"Ещё нужно минимум "
                     f"{remaining} свечей"
+                )
+
+                time.sleep(
+                    UPDATE_INTERVAL
+                )
+
+                continue
+
+            # -----------------------------------------------------
+            # CHECK NEW CLOSED CANDLE
+            # -----------------------------------------------------
+
+            latest_closed = (
+                closed_candles[-1]
+            )
+
+            latest_closed_timestamp = (
+                latest_closed.get(
+                    "timestamp"
+                )
+            )
+
+            if (
+                latest_closed_timestamp
+                == last_analyzed_timestamp
+            ):
+
+                logger.info(
+                    "⏳ Новая закрытая свеча "
+                    "ещё не появилась"
                 )
 
                 time.sleep(
@@ -1670,9 +2049,13 @@ def main():
                 candles
             )
 
+            # Запоминаем, что эта свеча уже анализировалась
+            last_analyzed_timestamp = (
+                latest_closed_timestamp
+            )
+
             print_current_analysis(
-                result,
-                candles
+                result
             )
 
             # -----------------------------------------------------
@@ -1681,27 +2064,35 @@ def main():
 
             if (
                 result
-                and result.get("prediction")
+                and result.get(
+                    "prediction"
+                )
             ):
 
-                if not has_active_signal():
+                signal_candle = (
+                    result.get(
+                        "signal_candle"
+                    )
+                )
 
-                    latest_candle = candles[-1]
+                if signal_candle:
 
-                    saved_signal = save_signal(
-                        result,
-                        latest_candle
+                    saved_signal = (
+                        save_signal(
+                            result,
+                            signal_candle,
+                        )
                     )
 
                     if saved_signal:
 
                         print_signal(
                             result,
-                            latest_candle
+                            signal_candle,
                         )
 
             # -----------------------------------------------------
-            # STATS
+            # STATISTICS
             # -----------------------------------------------------
 
             if cycle % 12 == 0:
@@ -1753,7 +2144,9 @@ if __name__ == "__main__":
     except Exception:
 
         print()
-        print("❌ КРИТИЧЕСКАЯ ОШИБКА:")
+        print(
+            "❌ КРИТИЧЕСКАЯ ОШИБКА:"
+        )
 
         traceback.print_exc()
 
