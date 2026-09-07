@@ -360,13 +360,14 @@ def parse_game_message(text):
     Разбирает сообщение статистики.
 
     Пример:
-
-    #N1001. ✅20(Q♣J♥Q♥J♠10♥) - 27(7♣7♥K♦9♥)
+    #N1001. ✅19(Q♣J♥Q♥J♠10♥) - 27(7♣7♥K♦9♥)
     #T47 (ID: 750854415)
 
     Возвращает:
     - номер игры
     - ID игры
+    - очки игрока
+    - очки дилера
     - карты игрока
     - карты дилера
     - теги
@@ -390,9 +391,7 @@ def parse_game_message(text):
     if not game_match:
         return None
 
-    game_number = int(
-        game_match.group(1)
-    )
+    game_number = int(game_match.group(1))
 
     # ------------------------------------------------
     # GAME ID
@@ -411,14 +410,10 @@ def parse_game_message(text):
             flags=re.IGNORECASE
         )
 
-    game_id = (
-        id_match.group(1)
-        if id_match
-        else None
-    )
+    game_id = id_match.group(1) if id_match else None
 
     # ------------------------------------------------
-    # TAGS
+    # ТЕГИ
     # ------------------------------------------------
 
     found_tags = re.findall(
@@ -431,7 +426,6 @@ def parse_game_message(text):
     for tag in found_tags:
         tag = tag.upper().strip()
 
-        # N1001 и T47 не считаем спец-тегами
         if re.fullmatch(r"N\d+", tag):
             continue
 
@@ -441,7 +435,35 @@ def parse_game_message(text):
         tags.add(tag)
 
     # ------------------------------------------------
-    # ИЩЕМ ДВЕ ГРУППЫ КАРТ В СКОБКАХ
+    # ОЧКИ ИГРОКА И ДИЛЕРА
+    #
+    # Формат:
+    # #N1001. ✅19(Q♣...) - 27(7♣...)
+    #
+    # Первая цифра перед первой группой карт = игрок
+    # Вторая = дилер
+    # ------------------------------------------------
+
+    score_match = re.search(
+        r"#N\d+\.\s*(?:[✅🔰])?\s*(\d+)\s*\([^)]*[♠♣♦♥][^)]*\)"
+        r"\s*-\s*(?:[✅🔰])?\s*(\d+)\s*\([^)]*[♠♣♦♥][^)]*\)",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    player_score = None
+    dealer_score = None
+
+    if score_match:
+        try:
+            player_score = int(score_match.group(1))
+            dealer_score = int(score_match.group(2))
+        except (ValueError, TypeError):
+            player_score = None
+            dealer_score = None
+
+    # ------------------------------------------------
+    # ИЩЕМ ДВЕ ГРУППЫ КАРТ
     # ------------------------------------------------
 
     groups = re.findall(
@@ -454,10 +476,7 @@ def parse_game_message(text):
     for group in groups:
 
         # ID не содержит мастей
-        if not re.search(
-            r"[♠♣♦♥]",
-            group
-        ):
+        if not re.search(r"[♠♣♦♥]", group):
             continue
 
         cards = re.findall(
@@ -470,23 +489,17 @@ def parse_game_message(text):
             parsed_cards = []
 
             for rank, suit in cards:
-                card = normalize_card(
-                    rank,
-                    suit
-                )
+                card = normalize_card(rank, suit)
 
                 if card:
                     parsed_cards.append(card)
 
             if parsed_cards:
-                card_groups.append(
-                    parsed_cards
-                )
+                card_groups.append(parsed_cards)
 
     if not card_groups:
         return None
 
-    # Обычно первая группа = игрок
     player_cards = (
         card_groups[0]
         if len(card_groups) >= 1
@@ -503,6 +516,10 @@ def parse_game_message(text):
         "game_number": game_number,
         "game_id": game_id,
         "tags": tags,
+
+        "player_score": player_score,
+        "dealer_score": dealer_score,
+
         "player_cards": player_cards,
         "dealer_cards": dealer_cards,
         "text": text
@@ -535,44 +552,60 @@ def has_excluded_tags(parsed):
 
 def build_pattern_prediction(parsed):
     """
-    ЛОГИКА:
+    ТРИГГЕРНАЯ ЛОГИКА:
 
-    Берём первую карту игрока.
-
-    Только J/Q/K/A.
-
-    Ранг:
-        J <-> K
-        Q <-> A
-
-    Масть:
-        ♣ <-> ♥
-        ♠ <-> ♦
-
-    Прогнозируются ДВЕ МАСТИ:
-        исходная
-        зеркальная
-
-    Пример:
-        Q♣
-
-    Ранг:
-        Q -> A
-
-    Масти:
-        ♣
-        ♥ (зеркальная)
-
-    Итог:
-        A♣
-        A♥
+    1. Нет #G #O #R #X
+    2. Очки игрока СТРОГО МЕНЬШЕ 21
+    3. Первая карта игрока только J/Q/K/A
+    4. Ранг:
+       J -> K
+       K -> J
+       Q -> A
+       A -> Q
+    5. Масть:
+       ♣ -> ♣ + ♥
+       ♥ -> ♥ + ♣
+       ♠ -> ♠ + ♦
+       ♦ -> ♦ + ♠
+    6. Прогноз +11 игр
     """
 
     if not parsed:
         return None
 
+    # ------------------------------------------------
+    # ИСКЛЮЧАЮЩИЕ ТЕГИ
+    # ------------------------------------------------
+
     if has_excluded_tags(parsed):
         return None
+
+    # ------------------------------------------------
+    # НОВОЕ УСЛОВИЕ:
+    # У ИГРОКА ДОЛЖНО БЫТЬ МЕНЬШЕ 21 ОЧКОВ
+    # ------------------------------------------------
+
+    player_score = parsed.get("player_score")
+
+    if player_score is None:
+        print(
+            f"⏭️ #N{parsed.get('game_number')} — "
+            f"не удалось определить очки игрока",
+            flush=True
+        )
+        return None
+
+    if player_score >= 21:
+        print(
+            f"🚫 #N{parsed.get('game_number')} — "
+            f"игрок {player_score} очков, нужно строго < 21",
+            flush=True
+        )
+        return None
+
+    # ------------------------------------------------
+    # КАРТЫ ИГРОКА
+    # ------------------------------------------------
 
     player_cards = parsed.get(
         "player_cards",
@@ -600,11 +633,19 @@ def build_pattern_prediction(parsed):
         match.group(2)
     )
 
-    if not source_rank:
+    if not source_rank or not source_suit:
         return None
+
+    # ------------------------------------------------
+    # ТОЛЬКО J/Q/K/A
+    # ------------------------------------------------
 
     if source_rank not in SOURCE_RANKS:
         return None
+
+    # ------------------------------------------------
+    # ЗЕРКАЛЬНЫЙ РАНГ
+    # ------------------------------------------------
 
     target_rank = RANK_MIRROR.get(
         source_rank
@@ -613,6 +654,10 @@ def build_pattern_prediction(parsed):
     if not target_rank:
         return None
 
+    # ------------------------------------------------
+    # ЗЕРКАЛЬНАЯ МАСТЬ
+    # ------------------------------------------------
+
     mirror_suit = SUIT_MIRROR.get(
         source_suit
     )
@@ -620,9 +665,9 @@ def build_pattern_prediction(parsed):
     if not mirror_suit:
         return None
 
-    # Две карты:
-    # исходная масть
-    # зеркальная масть
+    # ------------------------------------------------
+    # ДВЕ ПРОГНОЗИРУЕМЫЕ КАРТЫ
+    # ------------------------------------------------
 
     card_original = normalize_card(
         target_rank,
@@ -637,20 +682,20 @@ def build_pattern_prediction(parsed):
     predicted_cards = []
 
     if card_original:
-        predicted_cards.append(
-            card_original
-        )
+        predicted_cards.append(card_original)
 
     if (
         card_mirror
         and card_mirror not in predicted_cards
     ):
-        predicted_cards.append(
-            card_mirror
-        )
+        predicted_cards.append(card_mirror)
 
     if not predicted_cards:
         return None
+
+    # ------------------------------------------------
+    # +11 ИГР
+    # ------------------------------------------------
 
     target_number = add_game_offset(
         parsed["game_number"],
@@ -659,14 +704,18 @@ def build_pattern_prediction(parsed):
 
     return {
         "source_number": parsed["game_number"],
-        "source_game_id": parsed.get(
-            "game_id"
-        ),
+        "source_game_id": parsed.get("game_id"),
+
+        "player_score": player_score,
+        "dealer_score": parsed.get("dealer_score"),
+
         "source_card": first_card,
         "source_rank": source_rank,
         "source_suit": source_suit,
+
         "target_rank": target_rank,
         "target_number": target_number,
+
         "predicted_cards": predicted_cards
     }
 
