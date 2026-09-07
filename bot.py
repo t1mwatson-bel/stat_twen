@@ -20,44 +20,59 @@ import requests
 
 BASE_URL = "https://api.binarium.com"
 
-# Asset ID
+# ---------------------------------------------------------------------
+# АКТИВ
+# ---------------------------------------------------------------------
+
 ASSET_ID = 43
 
-# Интервал свечей
+# Название для Telegram
+ASSET_NAME = "EUR/USD"
+
+
+# ---------------------------------------------------------------------
+# СВЕЧИ
+# ---------------------------------------------------------------------
+
+# Интервал свечей для анализа
 DETAILIZATION = "5s"
 
-# База данных
+# Продолжительность одной свечи
+CANDLE_SECONDS = 5
+
+
+# ---------------------------------------------------------------------
+# DATABASE
+# ---------------------------------------------------------------------
+
 DB_FILE = "binarium_history.db"
 
 
-# =====================================================================
+# ---------------------------------------------------------------------
 # TELEGRAM
-# =====================================================================
+# ---------------------------------------------------------------------
 
+# Берутся из переменных окружения хостинга
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-TELEGRAM_API_URL = (
-    f"https://api.telegram.org/bot{BOT_TOKEN}"
-    if BOT_TOKEN
-    else None
-)
+TELEGRAM_API_URL = "https://api.telegram.org"
 
 
 # =====================================================================
 # СБОР ИСТОРИИ
 # =====================================================================
 
-# При первом запуске загрузить столько часов истории
+# При первом запуске
 HISTORY_HOURS = 12
 
-# Размер одного запроса истории
+# Размер одного запроса
 CHUNK_MINUTES = 60
 
-# Каждые сколько секунд обновлять данные
+# Интервал обновления
 UPDATE_INTERVAL = 5
 
-# Сколько последних минут запрашивать при live-обновлении
+# Последние минуты для обновления
 LIVE_WINDOW_MINUTES = 10
 
 REQUEST_TIMEOUT = 30
@@ -68,16 +83,16 @@ MAX_RETRIES = 3
 # АНАЛИЗ ПАТТЕРНОВ
 # =====================================================================
 
-# Сколько последних ЗАКРЫТЫХ свечей составляют паттерн
+# Последние закрытые свечи для паттерна
 PATTERN_LENGTH = 6
 
-# Минимальное количество похожих паттернов
+# Минимум исторических совпадений
 MIN_MATCHES = 4
 
-# Сколько свечей минимум нужно накопить перед анализом
+# Минимум свечей в базе
 MIN_CANDLES_FOR_ANALYSIS = 500
 
-# Минимальная вероятность для сигнала
+# Минимальная уверенность
 MIN_CONFIDENCE = 58.0
 
 
@@ -85,15 +100,12 @@ MIN_CONFIDENCE = 58.0
 # ЭКСПИРАЦИЯ
 # =====================================================================
 
-# Продолжительность одной свечи
-CANDLE_SECONDS = 5
+# Экспирация в минутах
+EXPIRATION_MINUTES = 1
 
-# Экспирация сигнала
-EXPIRATION_SECONDS = 30
-
-# Через сколько свечей проверять результат
-EXPIRATION_CANDLES = (
-    EXPIRATION_SECONDS // CANDLE_SECONDS
+# Экспирация в секундах
+EXPIRATION_SECONDS = (
+    EXPIRATION_MINUTES * 60
 )
 
 
@@ -169,9 +181,7 @@ def parse_api_time(value):
     if not value:
         return None
 
-    value = str(
-        value
-    ).strip()
+    value = str(value).strip()
 
     if value.endswith("Z"):
 
@@ -203,9 +213,7 @@ def parse_api_time(value):
 
 def timestamp_from_api_time(value):
 
-    dt = parse_api_time(
-        value
-    )
+    dt = parse_api_time(value)
 
     if dt is None:
         return 0.0
@@ -213,270 +221,44 @@ def timestamp_from_api_time(value):
     return dt.timestamp()
 
 
-def format_price(value):
+def timestamp_to_datetime(timestamp):
 
-    if value is None:
-        return "—"
+    return datetime.fromtimestamp(
+        timestamp,
+        tz=timezone.utc,
+    )
 
-    try:
-        return f"{float(value):.6f}"
-    except Exception:
-        return str(value)
+
+def format_timestamp(timestamp):
+
+    dt = timestamp_to_datetime(
+        timestamp
+    )
+
+    return dt.strftime(
+        "%H:%M:%S UTC"
+    )
 
 
 # =====================================================================
-# TELEGRAM
+# NEXT MINUTE ENTRY
 # =====================================================================
 
-def telegram_ready():
+def get_next_minute_timestamp(timestamp):
 
-    if not BOT_TOKEN:
-
-        logger.error(
-            "❌ BOT_TOKEN не найден "
-            "в переменных окружения"
-        )
-
-        return False
-
-    if not CHANNEL_ID:
-
-        logger.error(
-            "❌ CHANNEL_ID не найден "
-            "в переменных окружения"
-        )
-
-        return False
-
-    return True
-
-
-def send_telegram_message(text):
-
-    if not telegram_ready():
-        return False
-
-    url = (
-        f"{TELEGRAM_API_URL}"
-        f"/sendMessage"
+    dt = timestamp_to_datetime(
+        timestamp
     )
 
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    try:
-
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=15,
+    next_minute = (
+        dt.replace(
+            second=0,
+            microsecond=0,
         )
-
-        if response.status_code != 200:
-
-            logger.error(
-                "❌ Telegram HTTP %s: %s",
-                response.status_code,
-                response.text,
-            )
-
-            return False
-
-        try:
-
-            data = response.json()
-
-        except Exception:
-
-            logger.error(
-                "❌ Telegram вернул "
-                "некорректный JSON"
-            )
-
-            return False
-
-        if not data.get("ok"):
-
-            logger.error(
-                "❌ Telegram API ошибка: %s",
-                data,
-            )
-
-            return False
-
-        logger.info(
-            "📲 Сообщение успешно "
-            "отправлено в Telegram"
-        )
-
-        return True
-
-    except requests.RequestException as e:
-
-        logger.error(
-            "❌ Ошибка отправки Telegram: %s",
-            e,
-        )
-
-        return False
-
-    except Exception:
-
-        logger.exception(
-            "❌ Неожиданная ошибка Telegram"
-        )
-
-        return False
-
-
-def send_telegram_signal(
-    result,
-    candle,
-):
-
-    prediction = result.get(
-        "prediction"
+        + timedelta(minutes=1)
     )
 
-    if prediction == "UP":
-
-        direction = "🚀 ВЫШЕ 🟢"
-        direction_text = "ВЫШЕ"
-
-    elif prediction == "DOWN":
-
-        direction = "📉 НИЖЕ 🔴"
-        direction_text = "НИЖЕ"
-
-    else:
-
-        return False
-
-    candle_time = candle.get(
-        "time"
-    )
-
-    entry_price = candle.get(
-        "close"
-    )
-
-    pattern = pattern_to_text(
-        result.get(
-            "pattern",
-            [],
-        )
-    )
-
-    text = (
-        "🚨 <b>НОВЫЙ СИГНАЛ</b>\n"
-        "\n"
-        f"🎯 <b>НАПРАВЛЕНИЕ: {direction}</b>\n"
-        "\n"
-        f"🕯 Закрытая свеча: "
-        f"<code>{candle_time}</code>\n"
-        "\n"
-        f"💰 Цена входа: "
-        f"<code>{format_price(entry_price)}</code>\n"
-        "\n"
-        f"🧩 Паттерн: {pattern}\n"
-        "\n"
-        f"🔎 Совпадений: "
-        f"<b>{result.get('matches', 0)}</b>\n"
-        "\n"
-        f"🟢 Вверх: "
-        f"{result.get('up', 0)} "
-        f"({result.get('up_probability', 0.0):.1f}%)\n"
-        "\n"
-        f"🔴 Вниз: "
-        f"{result.get('down', 0)} "
-        f"({result.get('down_probability', 0.0):.1f}%)\n"
-        "\n"
-        f"📊 Уверенность: "
-        f"<b>{result.get('confidence', 0.0):.1f}%</b>\n"
-        "\n"
-        f"⏱ Экспирация: "
-        f"<b>{EXPIRATION_SECONDS} секунд</b>\n"
-        "\n"
-        f"⚡️ Прогноз: "
-        f"<b>{direction_text}</b>"
-    )
-
-    return send_telegram_message(
-        text
-    )
-
-
-def send_telegram_result(
-    signal_id,
-    signal_time,
-    entry_price,
-    prediction,
-    confidence,
-    expiration_seconds,
-    exit_time,
-    exit_price,
-    result,
-):
-
-    if result == "WIN":
-
-        result_text = (
-            "✅ ЗАШЛО!"
-        )
-
-        result_title = (
-            "🎉 <b>СИГНАЛ ЗАШЁЛ</b>"
-        )
-
-    else:
-
-        result_text = (
-            "❌ НЕ ЗАШЛО!"
-        )
-
-        result_title = (
-            "⚠️ <b>РЕЗУЛЬТАТ СИГНАЛА</b>"
-        )
-
-    if prediction == "UP":
-        prediction_text = "ВЫШЕ 🟢"
-    else:
-        prediction_text = "НИЖЕ 🔴"
-
-    text = (
-        f"{result_title}\n"
-        "\n"
-        f"🆔 Сигнал #{signal_id}\n"
-        "\n"
-        f"🎯 Прогноз: "
-        f"<b>{prediction_text}</b>\n"
-        "\n"
-        f"💰 Цена входа: "
-        f"<code>{format_price(entry_price)}</code>\n"
-        "\n"
-        f"💰 Цена через "
-        f"{expiration_seconds} сек: "
-        f"<code>{format_price(exit_price)}</code>\n"
-        "\n"
-        f"🕯 Время входа: "
-        f"<code>{signal_time}</code>\n"
-        "\n"
-        f"🕯 Время проверки: "
-        f"<code>{exit_time}</code>\n"
-        "\n"
-        f"📊 Уверенность: "
-        f"{confidence:.1f}%\n"
-        "\n"
-        f"<b>{result_text}</b>"
-    )
-
-    return send_telegram_message(
-        text
-    )
+    return next_minute.timestamp()
 
 
 # =====================================================================
@@ -529,7 +311,9 @@ def init_database():
             signal_time TEXT NOT NULL,
             signal_timestamp REAL NOT NULL,
 
-            entry_price REAL NOT NULL,
+            entry_timestamp REAL,
+
+            entry_price REAL,
 
             prediction TEXT NOT NULL,
 
@@ -552,51 +336,12 @@ def init_database():
 
             checked_time TEXT,
 
-            telegram_signal_sent INTEGER DEFAULT 0,
+            telegram_sent INTEGER DEFAULT 0,
 
-            telegram_result_sent INTEGER DEFAULT 0
+            result_telegram_sent INTEGER DEFAULT 0
         )
         """
     )
-
-    # -------------------------------------------------------------
-    # МИГРАЦИЯ СТАРОЙ БАЗЫ
-    # -------------------------------------------------------------
-
-    cursor.execute(
-        "PRAGMA table_info(signals)"
-    )
-
-    existing_columns = {
-        row[1]
-        for row in cursor.fetchall()
-    }
-
-    if (
-        "telegram_signal_sent"
-        not in existing_columns
-    ):
-
-        cursor.execute(
-            """
-            ALTER TABLE signals
-            ADD COLUMN telegram_signal_sent
-            INTEGER DEFAULT 0
-            """
-        )
-
-    if (
-        "telegram_result_sent"
-        not in existing_columns
-    ):
-
-        cursor.execute(
-            """
-            ALTER TABLE signals
-            ADD COLUMN telegram_result_sent
-            INTEGER DEFAULT 0
-            """
-        )
 
     cursor.execute(
         """
@@ -616,9 +361,99 @@ def init_database():
     conn.close()
 
     logger.info(
-        f"✅ База данных готова: "
-        f"{DB_FILE}"
+        f"✅ База данных готова: {DB_FILE}"
     )
+
+
+# =====================================================================
+# TELEGRAM
+# =====================================================================
+
+def telegram_ready():
+
+    if not BOT_TOKEN:
+
+        logger.warning(
+            "⚠️ BOT_TOKEN не найден "
+            "в переменных окружения"
+        )
+
+        return False
+
+    if not CHANNEL_ID:
+
+        logger.warning(
+            "⚠️ CHANNEL_ID не найден "
+            "в переменных окружения"
+        )
+
+        return False
+
+    return True
+
+
+def send_telegram_message(text):
+
+    if not telegram_ready():
+
+        return False
+
+    url = (
+        f"{TELEGRAM_API_URL}"
+        f"/bot{BOT_TOKEN}"
+        f"/sendMessage"
+    )
+
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=20,
+        )
+
+        if response.status_code != 200:
+
+            logger.error(
+                f"❌ Telegram HTTP "
+                f"{response.status_code}: "
+                f"{response.text}"
+            )
+
+            return False
+
+        result = response.json()
+
+        if not result.get("ok"):
+
+            logger.error(
+                f"❌ Telegram ошибка: "
+                f"{result}"
+            )
+
+            return False
+
+        logger.info(
+            "📨 Сообщение отправлено "
+            "в Telegram"
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            f"❌ Ошибка Telegram: {e}"
+        )
+
+        return False
 
 
 # =====================================================================
@@ -895,6 +730,7 @@ def save_candles(candles):
             )
 
             if not exists:
+
                 new_saved += 1
 
         conn.commit()
@@ -1131,11 +967,9 @@ def update_recent_candles():
         raw
     )
 
-    saved = save_candles(
+    return save_candles(
         candles
     )
-
-    return saved
 
 
 # =====================================================================
@@ -1216,12 +1050,8 @@ def build_directions(candles):
 
     for candle in candles:
 
-        direction = candle_direction(
-            candle
-        )
-
         directions.append(
-            direction
+            candle_direction(candle)
         )
 
     return directions
@@ -1240,10 +1070,7 @@ def pattern_to_text(pattern):
     }
 
     return "".join(
-        symbols.get(
-            item,
-            "?"
-        )
+        symbols.get(item, "?")
         for item in pattern
     )
 
@@ -1278,6 +1105,7 @@ def find_pattern_matches(
     )
 
     if max_search_index <= pattern_length:
+
         return matches
 
     for i in range(
@@ -1342,16 +1170,13 @@ def analyze_pattern(candles):
         -PATTERN_LENGTH:
     ]
 
-    if (
-        len(current_pattern)
-        < PATTERN_LENGTH
-    ):
-
-        return None
-
     if None in current_pattern:
 
         return None
+
+    signal_candle = (
+        closed_candles[-1]
+    )
 
     if "FLAT" in current_pattern:
 
@@ -1368,9 +1193,7 @@ def analyze_pattern(candles):
                 "В текущем паттерне "
                 "есть FLAT-свеча"
             ),
-            "signal_candle": (
-                closed_candles[-1]
-            ),
+            "signal_candle": signal_candle,
         }
 
     matches = find_pattern_matches(
@@ -1395,10 +1218,6 @@ def analyze_pattern(candles):
         + down_count
     )
 
-    signal_candle = (
-        closed_candles[-1]
-    )
-
     if total < MIN_MATCHES:
 
         return {
@@ -1418,15 +1237,11 @@ def analyze_pattern(candles):
         }
 
     up_probability = (
-        up_count
-        / total
-        * 100
+        up_count / total * 100
     )
 
     down_probability = (
-        down_count
-        / total
-        * 100
+        down_count / total * 100
     )
 
     prediction = None
@@ -1462,10 +1277,7 @@ def analyze_pattern(candles):
 
         prediction = None
 
-    if (
-        prediction
-        and not reason
-    ):
+    if prediction and not reason:
 
         reason = (
             "Сигнал соответствует "
@@ -1514,11 +1326,11 @@ def has_active_signal():
 
 
 # =====================================================================
-# CHECK SIGNAL FOR SAME CANDLE
+# SIGNAL EXISTS FOR ENTRY TIME
 # =====================================================================
 
-def signal_exists_for_candle(
-    signal_timestamp,
+def signal_exists_for_entry(
+    entry_timestamp,
 ):
 
     conn = sqlite3.connect(
@@ -1531,11 +1343,11 @@ def signal_exists_for_candle(
         """
         SELECT id
         FROM signals
-        WHERE signal_timestamp = ?
+        WHERE entry_timestamp = ?
         LIMIT 1
         """,
         (
-            signal_timestamp,
+            entry_timestamp,
         ),
     )
 
@@ -1572,19 +1384,32 @@ def save_signal(
 
     if signal_timestamp is None:
 
-        logger.warning(
-            "⚠️ У свечи нет timestamp"
-        )
-
         return None
 
-    if signal_exists_for_candle(
-        signal_timestamp
+    # -------------------------------------------------------------
+    # ТОЧКА ВХОДА = НАЧАЛО СЛЕДУЮЩЕЙ МИНУТЫ
+    # -------------------------------------------------------------
+
+    entry_timestamp = (
+        get_next_minute_timestamp(
+            signal_timestamp
+        )
+    )
+
+    # Если сигнал уже слишком поздний
+    if entry_timestamp <= time.time():
+
+        entry_timestamp = (
+            entry_timestamp + 60
+        )
+
+    if signal_exists_for_entry(
+        entry_timestamp
     ):
 
         logger.info(
-            "⏭️ Для этой свечи "
-            "сигнал уже создавался"
+            "⏭️ Для этой точки входа "
+            "сигнал уже существует"
         )
 
         return None
@@ -1593,23 +1418,7 @@ def save_signal(
 
         logger.info(
             "⏳ Уже есть активный сигнал. "
-            "Ждём проверки."
-        )
-
-        return None
-
-    signal_time = candle.get(
-        "time"
-    )
-
-    entry_price = candle.get(
-        "close"
-    )
-
-    if entry_price is None:
-
-        logger.warning(
-            "⚠️ У свечи нет цены close"
+            "Ждём результата."
         )
 
         return None
@@ -1634,6 +1443,7 @@ def save_signal(
             INSERT INTO signals (
                 signal_time,
                 signal_timestamp,
+                entry_timestamp,
                 entry_price,
                 prediction,
                 confidence,
@@ -1642,18 +1452,21 @@ def save_signal(
                 down_count,
                 pattern,
                 expiration_seconds,
-                checked,
-                telegram_signal_sent,
-                telegram_result_sent
+                checked
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
             )
             """,
             (
-                signal_time,
+                candle.get("time"),
                 signal_timestamp,
-                entry_price,
+                entry_timestamp,
+
+                # Реальная цена входа будет
+                # зафиксирована после начала минуты
+                None,
+
                 prediction,
                 result.get(
                     "confidence",
@@ -1680,12 +1493,10 @@ def save_signal(
 
         conn.commit()
 
-        logger.info(
-            f"💾 Сигнал #{signal_id} "
-            f"сохранён в базу"
-        )
-
-        return signal_id
+        return {
+            "id": signal_id,
+            "entry_timestamp": entry_timestamp,
+        }
 
     except Exception:
 
@@ -1701,82 +1512,107 @@ def save_signal(
 
 
 # =====================================================================
-# MARK TELEGRAM SIGNAL SENT
+# TELEGRAM SIGNAL MESSAGE
 # =====================================================================
 
-def mark_telegram_signal_sent(
-    signal_id,
-):
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        UPDATE signals
-        SET telegram_signal_sent = 1
-        WHERE id = ?
-        """,
-        (
-            signal_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
-
-# =====================================================================
-# MARK TELEGRAM RESULT SENT
-# =====================================================================
-
-def mark_telegram_result_sent(
-    signal_id,
-):
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        UPDATE signals
-        SET telegram_result_sent = 1
-        WHERE id = ?
-        """,
-        (
-            signal_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
-
-# =====================================================================
-# SHOW SIGNAL
-# =====================================================================
-
-def print_signal(
+def send_signal_to_telegram(
     result,
-    candle,
+    signal_data,
 ):
 
     prediction = result.get(
         "prediction"
     )
 
-    if prediction not in (
-        "UP",
-        "DOWN",
-    ):
+    entry_timestamp = signal_data.get(
+        "entry_timestamp"
+    )
 
-        return
+    entry_time = format_timestamp(
+        entry_timestamp
+    )
+
+    if prediction == "UP":
+
+        direction = (
+            "🚀 ВЫШЕ 🟢"
+        )
+
+        short_direction = (
+            "ВЫШЕ"
+        )
+
+    else:
+
+        direction = (
+            "📉 НИЖЕ 🔴"
+        )
+
+        short_direction = (
+            "НИЖЕ"
+        )
+
+    message = (
+        "🚨 <b>НОВЫЙ СИГНАЛ</b>\n\n"
+
+        f"💱 <b>АКТИВ: {ASSET_NAME}</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━\n\n"
+
+        f"⏰ <b>ТОЧКА ВХОДА: "
+        f"{entry_time}</b>\n\n"
+
+        f"🎯 <b>НАПРАВЛЕНИЕ: "
+        f"{direction}</b>\n\n"
+
+        f"⏱ <b>ЭКСПИРАЦИЯ: "
+        f"{EXPIRATION_MINUTES} МИН.</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━\n\n"
+
+        f"🧩 Паттерн: "
+        f"{pattern_to_text(result['pattern'])}\n\n"
+
+        f"🔎 Совпадений: "
+        f"<b>{result['matches']}</b>\n\n"
+
+        f"🟢 Вверх: "
+        f"{result['up']} "
+        f"({result['up_probability']:.1f}%)\n\n"
+
+        f"🔴 Вниз: "
+        f"{result['down']} "
+        f"({result['down_probability']:.1f}%)\n\n"
+
+        f"📊 Уверенность: "
+        f"<b>{result['confidence']:.1f}%</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━\n\n"
+
+        f"⚡️ <b>ПРОГНОЗ: "
+        f"{short_direction}</b>\n"
+
+        f"🕐 <b>ВХОД РОВНО В "
+        f"{entry_time}</b>"
+    )
+
+    return send_telegram_message(
+        message
+    )
+
+
+# =====================================================================
+# PRINT SIGNAL
+# =====================================================================
+
+def print_signal(
+    result,
+    signal_data,
+):
+
+    entry_timestamp = signal_data.get(
+        "entry_timestamp"
+    )
 
     logger.info("")
     logger.info("=" * 65)
@@ -1784,13 +1620,22 @@ def print_signal(
     logger.info("=" * 65)
 
     logger.info(
-        f"🕯 Закрытая свеча: "
-        f"{candle.get('time')}"
+        f"💱 Актив: {ASSET_NAME}"
     )
 
     logger.info(
-        f"💰 Цена входа: "
-        f"{candle.get('close')}"
+        f"⏰ ТОЧКА ВХОДА: "
+        f"{format_timestamp(entry_timestamp)}"
+    )
+
+    logger.info(
+        f"🎯 Направление: "
+        f"{result['prediction']}"
+    )
+
+    logger.info(
+        f"⏱ Экспирация: "
+        f"{EXPIRATION_MINUTES} мин."
     )
 
     logger.info(
@@ -1804,47 +1649,41 @@ def print_signal(
     )
 
     logger.info(
-        f"🟢 Вверх: "
-        f"{result['up']} "
-        f"({result['up_probability']:.1f}%)"
-    )
-
-    logger.info(
-        f"🔴 Вниз: "
-        f"{result['down']} "
-        f"({result['down_probability']:.1f}%)"
-    )
-
-    logger.info("-" * 65)
-
-    if prediction == "UP":
-
-        logger.info(
-            "🚀 СИГНАЛ: ВЫШЕ 🟢"
-        )
-
-    else:
-
-        logger.info(
-            "📉 СИГНАЛ: НИЖЕ 🔴"
-        )
-
-    logger.info(
-        f"🎯 Вероятность: "
+        f"📊 Уверенность: "
         f"{result['confidence']:.1f}%"
     )
 
-    logger.info(
-        f"📊 Основание: "
-        f"{result.get('reason')}"
-    )
-
-    logger.info(
-        f"⏱ Экспирация: "
-        f"{EXPIRATION_SECONDS} секунд"
-    )
-
     logger.info("=" * 65)
+
+
+# =====================================================================
+# GET ENTRY PRICE
+# =====================================================================
+
+def get_entry_price(
+    cursor,
+    entry_timestamp,
+):
+
+    cursor.execute(
+        """
+        SELECT
+            time,
+            timestamp,
+            open
+        FROM candles
+        WHERE asset_id = ?
+        AND timestamp >= ?
+        ORDER BY timestamp ASC
+        LIMIT 1
+        """,
+        (
+            ASSET_ID,
+            entry_timestamp,
+        ),
+    )
+
+    return cursor.fetchone()
 
 
 # =====================================================================
@@ -1856,23 +1695,7 @@ def check_pending_signals(candles):
     if not candles:
         return
 
-    closed_candles = get_closed_candles(
-        candles
-    )
-
-    if not closed_candles:
-        return
-
-    latest_candle = (
-        closed_candles[-1]
-    )
-
-    latest_timestamp = latest_candle.get(
-        "timestamp"
-    )
-
-    if latest_timestamp is None:
-        return
+    now_timestamp = time.time()
 
     conn = sqlite3.connect(
         DB_FILE
@@ -1886,11 +1709,12 @@ def check_pending_signals(candles):
             id,
             signal_time,
             signal_timestamp,
+            entry_timestamp,
             entry_price,
             prediction,
             confidence,
             expiration_seconds,
-            telegram_result_sent
+            result_telegram_sent
         FROM signals
         WHERE checked = 0
         ORDER BY id ASC
@@ -1902,7 +1726,6 @@ def check_pending_signals(candles):
     if not signals:
 
         conn.close()
-
         return
 
     for signal in signals:
@@ -1910,34 +1733,83 @@ def check_pending_signals(candles):
         signal_id = signal[0]
         signal_time = signal[1]
         signal_timestamp = signal[2]
-        entry_price = signal[3]
-        prediction = signal[4]
-        confidence = signal[5]
-        expiration_seconds = signal[6]
-        telegram_result_sent = signal[7]
+        entry_timestamp = signal[3]
+        entry_price = signal[4]
+        prediction = signal[5]
+        confidence = signal[6]
+        expiration_seconds = signal[7]
+        result_telegram_sent = signal[8]
 
         # ---------------------------------------------------------
-        # ВАЖНО:
-        # Вход происходит после закрытия сигнальной свечи.
-        #
-        # timestamp = начало свечи
-        # + 5 секунд = момент закрытия / входа
-        # + 30 секунд = реальная экспирация
+        # ЖДЁМ ТОЧКУ ВХОДА
         # ---------------------------------------------------------
 
-        entry_timestamp = (
-            signal_timestamp
-            + CANDLE_SECONDS
-        )
+        if now_timestamp < entry_timestamp:
+
+            continue
+
+        # ---------------------------------------------------------
+        # ФИКСИРУЕМ РЕАЛЬНУЮ ЦЕНУ ВХОДА
+        # ---------------------------------------------------------
+
+        if entry_price is None:
+
+            entry_row = get_entry_price(
+                cursor,
+                entry_timestamp,
+            )
+
+            if not entry_row:
+
+                continue
+
+            entry_candle_time = entry_row[0]
+            entry_candle_timestamp = entry_row[1]
+            real_entry_price = entry_row[2]
+
+            # Убеждаемся что свеча уже существует
+            if entry_candle_timestamp > now_timestamp:
+
+                continue
+
+            cursor.execute(
+                """
+                UPDATE signals
+                SET entry_price = ?
+                WHERE id = ?
+                """,
+                (
+                    real_entry_price,
+                    signal_id,
+                ),
+            )
+
+            conn.commit()
+
+            entry_price = real_entry_price
+
+            logger.info(
+                f"📍 Зафиксирована цена входа "
+                f"для сигнала #{signal_id}: "
+                f"{entry_price}"
+            )
+
+        # ---------------------------------------------------------
+        # ВРЕМЯ ЭКСПИРАЦИИ
+        # ---------------------------------------------------------
 
         expiration_timestamp = (
             entry_timestamp
             + expiration_seconds
         )
 
-        if latest_timestamp < expiration_timestamp:
+        if now_timestamp < expiration_timestamp:
 
             continue
+
+        # ---------------------------------------------------------
+        # ИЩЕМ СВЕЧУ ПОСЛЕ ЭКСПИРАЦИИ
+        # ---------------------------------------------------------
 
         cursor.execute(
             """
@@ -1956,13 +1828,14 @@ def check_pending_signals(candles):
                 ASSET_ID,
                 expiration_timestamp,
                 CANDLE_SECONDS,
-                time.time(),
+                now_timestamp,
             ),
         )
 
         exit_row = cursor.fetchone()
 
         if not exit_row:
+
             continue
 
         exit_time = exit_row[0]
@@ -1982,6 +1855,10 @@ def check_pending_signals(candles):
             if exit_price < entry_price:
 
                 result = "WIN"
+
+        # ---------------------------------------------------------
+        # СОХРАНЯЕМ РЕЗУЛЬТАТ
+        # ---------------------------------------------------------
 
         cursor.execute(
             """
@@ -2003,33 +1880,36 @@ def check_pending_signals(candles):
 
         conn.commit()
 
+        # ---------------------------------------------------------
+        # ЛОГ
+        # ---------------------------------------------------------
+
         logger.info("")
         logger.info("=" * 65)
         logger.info("🔍 ПРОВЕРКА СИГНАЛА")
         logger.info("=" * 65)
 
         logger.info(
+            f"💱 Актив: {ASSET_NAME}"
+        )
+
+        logger.info(
             f"🆔 Сигнал: #{signal_id}"
         )
 
         logger.info(
-            f"🕯 Сигнал был: "
-            f"{signal_time}"
+            f"🕐 Вход: "
+            f"{format_timestamp(entry_timestamp)}"
         )
 
         logger.info(
-            f"💰 Вход: "
+            f"💰 Цена входа: "
             f"{entry_price}"
         )
 
         logger.info(
-            f"⏰ Экспирация: "
-            f"{expiration_seconds} сек"
-        )
-
-        logger.info(
-            f"🕯 Свеча проверки: "
-            f"{exit_time}"
+            f"⏱ Экспирация: "
+            f"{EXPIRATION_MINUTES} мин."
         )
 
         logger.info(
@@ -2042,21 +1922,14 @@ def check_pending_signals(candles):
             f"{prediction}"
         )
 
-        logger.info(
-            f"📊 Уверенность: "
-            f"{confidence:.1f}%"
-        )
-
         if result == "WIN":
 
-            logger.info("")
             logger.info(
                 "✅ ЗАШЛО!"
             )
 
         else:
 
-            logger.info("")
             logger.info(
                 "❌ НЕ ЗАШЛО!"
             )
@@ -2067,25 +1940,70 @@ def check_pending_signals(candles):
         # TELEGRAM RESULT
         # ---------------------------------------------------------
 
-        if not telegram_result_sent:
+        if result == "WIN":
 
-            sent = send_telegram_result(
-                signal_id=signal_id,
-                signal_time=signal_time,
-                entry_price=entry_price,
-                prediction=prediction,
-                confidence=confidence,
-                expiration_seconds=expiration_seconds,
-                exit_time=exit_time,
-                exit_price=exit_price,
-                result=result,
+            result_text = (
+                "✅ ЗАШЛО"
             )
 
-            if sent:
+            result_emoji = "🎉"
 
-                mark_telegram_result_sent(
-                    signal_id
-                )
+        else:
+
+            result_text = (
+                "❌ НЕ ЗАШЛО"
+            )
+
+            result_emoji = "📊"
+
+        direction_text = (
+            "ВЫШЕ 🟢"
+            if prediction == "UP"
+            else "НИЖЕ 🔴"
+        )
+
+        telegram_message = (
+            f"{result_emoji} "
+            f"<b>РЕЗУЛЬТАТ СИГНАЛА</b>\n\n"
+
+            f"💱 <b>АКТИВ: "
+            f"{ASSET_NAME}</b>\n\n"
+
+            f"🎯 Прогноз: "
+            f"<b>{direction_text}</b>\n\n"
+
+            f"💰 Вход: "
+            f"<b>{entry_price}</b>\n\n"
+
+            f"💰 Выход: "
+            f"<b>{exit_price}</b>\n\n"
+
+            f"⏱ Экспирация: "
+            f"<b>{EXPIRATION_MINUTES} мин.</b>\n\n"
+
+            "━━━━━━━━━━━━━━━━\n\n"
+
+            f"<b>{result_text}</b>"
+        )
+
+        sent = send_telegram_message(
+            telegram_message
+        )
+
+        if sent:
+
+            cursor.execute(
+                """
+                UPDATE signals
+                SET result_telegram_sent = 1
+                WHERE id = ?
+                """,
+                (
+                    signal_id,
+                ),
+            )
+
+            conn.commit()
 
     conn.close()
 
@@ -2106,6 +2024,7 @@ def print_statistics():
         """
         SELECT
             COUNT(*),
+
             SUM(
                 CASE
                     WHEN result = 'WIN'
@@ -2113,6 +2032,7 @@ def print_statistics():
                     ELSE 0
                 END
             ),
+
             SUM(
                 CASE
                     WHEN result = 'LOSE'
@@ -2120,7 +2040,9 @@ def print_statistics():
                     ELSE 0
                 END
             )
+
         FROM signals
+
         WHERE checked = 1
         """
     )
@@ -2264,11 +2186,15 @@ def main():
     logger.info("=" * 70)
 
     logger.info(
-        "⚙️ РЕЖИМ РАБОТЫ:"
+        f"💱 Актив: {ASSET_NAME}"
     )
 
     logger.info(
-        f"🕯 Интервал свечи: "
+        f"🆔 Asset ID: {ASSET_ID}"
+    )
+
+    logger.info(
+        f"🕯 Интервал анализа: "
         f"{DETAILIZATION}"
     )
 
@@ -2289,37 +2215,24 @@ def main():
 
     logger.info(
         f"⏱ Экспирация: "
-        f"{EXPIRATION_SECONDS} секунд"
+        f"{EXPIRATION_MINUTES} мин."
     )
-
-    # -------------------------------------------------------------
-    # TELEGRAM CHECK
-    # -------------------------------------------------------------
-
-    logger.info("")
-
-    if telegram_ready():
-
-        logger.info(
-            "📲 Telegram настроен"
-        )
-
-        logger.info(
-            f"📢 CHANNEL_ID: {CHANNEL_ID}"
-        )
-
-    else:
-
-        logger.warning(
-            "⚠️ Telegram не настроен. "
-            "Сигналы будут только в логах."
-        )
 
     # -------------------------------------------------------------
     # DATABASE
     # -------------------------------------------------------------
 
     init_database()
+
+    # -------------------------------------------------------------
+    # TELEGRAM
+    # -------------------------------------------------------------
+
+    if telegram_ready():
+
+        logger.info(
+            "✅ Telegram настроен"
+        )
 
     # -------------------------------------------------------------
     # HISTORY
@@ -2338,23 +2251,19 @@ def main():
     logger.info("")
 
     logger.info(
-        f"📚 Свечей в базе: "
-        f"{count}"
+        f"📚 Свечей в базе: {count}"
     )
 
     logger.info(
-        f"🕐 Первая: "
-        f"{first_time}"
+        f"🕐 Первая: {first_time}"
     )
 
     logger.info(
-        f"🕐 Последняя: "
-        f"{last_time}"
+        f"🕐 Последняя: {last_time}"
     )
 
     cycle = 0
 
-    # Последняя свеча, для которой уже выполнялся анализ
     last_analyzed_timestamp = None
 
     # -------------------------------------------------------------
@@ -2378,7 +2287,7 @@ def main():
             )
 
             # -----------------------------------------------------
-            # UPDATE
+            # UPDATE CANDLES
             # -----------------------------------------------------
 
             saved = update_recent_candles()
@@ -2388,13 +2297,11 @@ def main():
             )
 
             logger.info(
-                f"💾 Новых свечей: "
-                f"{saved}"
+                f"💾 Новых свечей: {saved}"
             )
 
             logger.info(
-                f"📚 Всего свечей: "
-                f"{count}"
+                f"📚 Всего свечей: {count}"
             )
 
             logger.info(
@@ -2431,7 +2338,7 @@ def main():
             )
 
             # -----------------------------------------------------
-            # GET CLOSED CANDLES
+            # CLOSED CANDLES
             # -----------------------------------------------------
 
             closed_candles = (
@@ -2451,11 +2358,7 @@ def main():
                 )
 
                 logger.info(
-                    "⏳ Накопление данных..."
-                )
-
-                logger.info(
-                    f"Ещё нужно минимум "
+                    f"⏳ Нужно ещё "
                     f"{remaining} свечей"
                 )
 
@@ -2466,7 +2369,7 @@ def main():
                 continue
 
             # -----------------------------------------------------
-            # CHECK NEW CLOSED CANDLE
+            # NEW CLOSED CANDLE
             # -----------------------------------------------------
 
             latest_closed = (
@@ -2503,7 +2406,6 @@ def main():
                 candles
             )
 
-            # Запоминаем, что эта свеча уже анализировалась
             last_analyzed_timestamp = (
                 latest_closed_timestamp
             )
@@ -2531,36 +2433,24 @@ def main():
 
                 if signal_candle:
 
-                    signal_id = (
+                    signal_data = (
                         save_signal(
                             result,
                             signal_candle,
                         )
                     )
 
-                    if signal_id:
+                    if signal_data:
 
                         print_signal(
                             result,
-                            signal_candle,
+                            signal_data,
                         )
 
-                        # -----------------------------------------
-                        # SEND TELEGRAM SIGNAL
-                        # -----------------------------------------
-
-                        telegram_sent = (
-                            send_telegram_signal(
-                                result,
-                                signal_candle,
-                            )
+                        send_signal_to_telegram(
+                            result,
+                            signal_data,
                         )
-
-                        if telegram_sent:
-
-                            mark_telegram_signal_sent(
-                                signal_id
-                            )
 
             # -----------------------------------------------------
             # STATISTICS
