@@ -1,4233 +1,1507 @@
 import os
 import sys
-import json
 import time
+import sqlite3
+import logging
+import traceback
+from datetime import datetime, timedelta, timezone
+
 import requests
-import pytz
-import re
-
-from datetime import datetime, timedelta
-from collections import defaultdict, Counter
 
 
 # =====================================================================
-# ENV
+# SETTINGS
 # =====================================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    BOT_TOKEN = os.getenv("BOT_TOKEN_PROGNOZ")
+BASE_URL = "https://api.binarium.com"
 
-CHANNEL_PROGNOZ = os.getenv("CHAT_ID_21")
-if not CHANNEL_PROGNOZ:
-    CHANNEL_PROGNOZ = os.getenv("CHANNEL_PROGNOZ")
+# Твой Asset ID
+ASSET_ID = 43
 
-CHANNEL_STATS = os.getenv("CHANNEL_STATS")
+# Интервал свечей
+DETAILIZATION = "5s"
 
-if not BOT_TOKEN or not CHANNEL_PROGNOZ:
-    print(
-        "❌ Ошибка: BOT_TOKEN или CHANNEL_PROGNOZ не заданы!",
-        flush=True
-    )
-    sys.exit(1)
+# База данных
+DB_FILE = "binarium_history.db"
 
 
 # =====================================================================
-# CONFIG
+# СБОР ИСТОРИИ
 # =====================================================================
 
-MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+# При первом запуске загрузить столько часов истории
+HISTORY_HOURS = 12
 
-BASE_URL = "https://1xlite-36553.pro"
-LEAGUE_ID = 1643503
+# Размер одного запроса истории
+CHUNK_MINUTES = 60
 
-DATA_FILE = "twentyone_data_full.json"
-PREDICTIONS_FILE = "twentyone_predictions.json"
-OFFSET_FILE = "hybrid_offset.txt"
+# Каждые сколько секунд обновлять данные
+UPDATE_INTERVAL = 5
 
-HISTORY_HOURS = 48
-DOGON_GAMES = 4
-POLL_INTERVAL = 2.0
+# Сколько последних минут запрашивать при live-обновлении
+LIVE_WINDOW_MINUTES = 10
 
-TARGET_RANKS = {"J", "Q", "K", "A"}
-
-TARGET_CARDS = [
-    "J♠️", "J♣️", "J♦️", "J♥️",
-    "Q♠️", "Q♣️", "Q♦️", "Q♥️",
-    "K♠️", "K♣️", "K♦️", "K♥️",
-    "A♠️", "A♣️", "A♦️", "A♥️"
-]
-
-# ================================================================
-# ТИПЫ ПРОГНОЗОВ
-#
-# Один ID может иметь несколько типов одновременно:
-# #R #G #O
-# ================================================================
-
-FORECAST_TYPES = ("R", "G", "O", "X")
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
 
 
 # =====================================================================
-# HYBRID WEIGHTS
+# АНАЛИЗ ПАТТЕРНОВ
 # =====================================================================
 
-WEIGHT_MS = 1.00
-WEIGHT_ID1 = 0.80
-WEIGHT_ID2 = 1.20
-WEIGHT_SEQUENCE = 1.10
-WEIGHT_FREQUENCY = 0.50
+# Сколько последних свечей составляют паттерн
+PATTERN_LENGTH = 8
 
-MIN_MS_MATCHES = 2
-MIN_ID1_MATCHES = 3
-MIN_ID2_MATCHES = 2
-MIN_SEQUENCE_MATCHES = 2
+# Минимальное количество похожих паттернов
+MIN_MATCHES = 5
 
-MIN_FORECAST_PROBABILITY = 0.25
-MIN_LEADER_GAP = 0.01
-MIN_ACTIVE_METHODS = 1
+# Сколько свечей минимум нужно накопить перед анализом
+MIN_CANDLES_FOR_ANALYSIS = 500
 
-PREDICTION_COOLDOWN_SECONDS = 2
+# Минимальная вероятность для сигнала
+MIN_CONFIDENCE = 60.0
+
+# Не искать паттерн слишком близко к текущему
+EXCLUDE_LAST = PATTERN_LENGTH + 2
 
 
 # =====================================================================
-# TELEGRAM
+# ЭКСПИРАЦИЯ
 # =====================================================================
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Свеча = 5 секунд
+CANDLE_SECONDS = 5
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Referer": (
-        f"{BASE_URL}/ru/live/twentyone/"
-        f"1643503-twentyone-game"
-    ),
-    "Cookie": (
-        "platform_type=desktop; "
-        "lng=ru; "
-        "cookies_agree_type=3; "
-        "tzo=3; "
-        "is12h=0"
-    )
-}
+# Экспирация сигнала = 30 секунд
+EXPIRATION_SECONDS = 30
 
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+# Через сколько свечей проверять результат
+EXPIRATION_CANDLES = (
+    EXPIRATION_SECONDS // CANDLE_SECONDS
+)
 
 
 # =====================================================================
-# CARD MAPS
+# ЛОГИРОВАНИЕ
 # =====================================================================
 
-SUITS_NAMES = {
-    0: "♠️",
-    1: "♣️",
-    2: "♦️",
-    3: "♥️"
-}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-RANKS = {
-    2: "2",
-    3: "3",
-    4: "4",
-    5: "5",
-    6: "6",
-    7: "7",
-    8: "8",
-    9: "9",
-    10: "10",
-    11: "J",
-    12: "Q",
-    13: "K",
-    14: "A"
-}
+logger = logging.getLogger("BINARIUM")
 
 
 # =====================================================================
-# GLOBALS
+# HTTP SESSION
 # =====================================================================
 
-history = []
-predictions = []
+session = requests.Session()
 
-# Кэш результатов Telegram.
-# game_number -> список записей.
-games_cache = {}
-
-# ID -> набор Telegram-тегов.
-#
-# Например:
-# {
-#     "750598382": {"R", "G", "O"},
-#     "750613777": {"X"}
-# }
-#
-game_tags = {}
-
-tracked_games = {}
-
-last_prediction_time = 0
-
-processed_numbers = set()
-
-
-# =====================================================================
-# NORMALIZATION
-# =====================================================================
-
-def normalize_suit(v):
-    if v is None or isinstance(v, bool):
-        return None
-
-    if isinstance(v, int):
-        s = SUITS_NAMES.get(v)
-        if s:
-            return s.replace("\ufe0f", "")
-
-    t = str(v).strip().replace("\ufe0f", "")
-
-    mapping = {
-        "0": "♠",
-        "♠": "♠",
-        "spade": "♠",
-        "spades": "♠",
-        "s": "♠",
-
-        "1": "♣",
-        "♣": "♣",
-        "club": "♣",
-        "clubs": "♣",
-        "c": "♣",
-
-        "2": "♦",
-        "♦": "♦",
-        "diamond": "♦",
-        "diamonds": "♦",
-        "d": "♦",
-
-        "3": "♥",
-        "♥": "♥",
-        "heart": "♥",
-        "hearts": "♥",
-        "h": "♥"
+session.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://binarium.com/",
+        "Origin": "https://binarium.com",
+        "Connection": "keep-alive",
     }
-
-    return mapping.get(t)
-
-
-def normalize_rank(v):
-    if v is None or isinstance(v, bool):
-        return None
-
-    if isinstance(v, int):
-        return RANKS.get(v)
-
-    t = str(v).strip().upper().replace("А", "A")
-
-    if t in {
-        "2", "3", "4", "5", "6",
-        "7", "8", "9", "10",
-        "J", "Q", "K", "A"
-    }:
-        return t
-
-    try:
-        return RANKS.get(int(t))
-    except:
-        return None
-
-
-def card_to_text(card):
-    if not card:
-        return ""
-
-    rank = normalize_rank(card.get("rank"))
-    suit = normalize_suit(card.get("suit"))
-
-    if not rank or not suit:
-        return ""
-
-    return f"{rank}{suit}\ufe0f"
-
-
-def card_dict_to_target(card):
-    text = card_to_text(card)
-
-    return text if text in TARGET_CARDS else None
+)
 
 
 # =====================================================================
-# JSON
+# DATABASE
 # =====================================================================
 
-def load_json_file(filename, default):
-    try:
-        if not os.path.exists(filename):
-            return default
+def init_database():
 
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
+    conn = sqlite3.connect(DB_FILE)
 
-    except Exception as e:
-        print(
-            f"⚠️ Ошибка чтения {filename}: {e}",
-            flush=True
+    cursor = conn.cursor()
+
+    # -------------------------------------------------------------
+    # СВЕЧИ
+    # -------------------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candles (
+            asset_id INTEGER NOT NULL,
+            time TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            PRIMARY KEY (asset_id, time)
         )
-        return default
+        """
+    )
 
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candles_timestamp
+        ON candles(asset_id, timestamp)
+        """
+    )
 
-def atomic_save_json(filename, data):
-    tmp = filename + ".tmp"
+    # -------------------------------------------------------------
+    # СИГНАЛЫ
+    # -------------------------------------------------------------
 
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-        os.replace(tmp, filename)
+            signal_time TEXT NOT NULL,
+            signal_timestamp REAL NOT NULL,
 
-        return True
+            entry_price REAL NOT NULL,
 
-    except Exception as e:
-        print(
-            f"⚠️ Ошибка сохранения {filename}: {e}",
-            flush=True
+            prediction TEXT NOT NULL,
+
+            confidence REAL NOT NULL,
+
+            matches INTEGER NOT NULL,
+
+            up_count INTEGER NOT NULL,
+            down_count INTEGER NOT NULL,
+
+            pattern TEXT NOT NULL,
+
+            expiration_seconds INTEGER NOT NULL,
+
+            checked INTEGER DEFAULT 0,
+
+            result TEXT,
+
+            exit_price REAL,
+
+            checked_time TEXT
         )
+        """
+    )
 
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except:
-            pass
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signals_checked
+        ON signals(checked)
+        """
+    )
 
-        return False
+    conn.commit()
+    conn.close()
+
+    logger.info(
+        f"✅ База данных готова: {DB_FILE}"
+    )
 
 
 # =====================================================================
-# HISTORY
+# TIME
 # =====================================================================
 
-def parse_history_timestamp(game):
-    value = game.get("timestamp") or game.get("timestamp_iso")
+def utc_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def format_api_time(dt):
+
+    dt = dt.astimezone(
+        timezone.utc
+    )
+
+    return dt.strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+
+def parse_api_time(value):
 
     if not value:
         return None
 
+    value = str(value).strip()
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
     try:
+
         dt = datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")
+            value
         )
 
         if dt.tzinfo is None:
-            dt = MOSCOW_TZ.localize(dt)
 
-        return dt.astimezone(MOSCOW_TZ)
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            timezone.utc
+        )
 
     except Exception:
+
         return None
 
 
-def cleanup_history_by_time(save=True):
-    global history
+def timestamp_from_api_time(value):
 
-    now = datetime.now(MOSCOW_TZ)
-    cutoff = now - timedelta(hours=HISTORY_HOURS)
+    dt = parse_api_time(
+        value
+    )
 
-    clean = []
+    if dt is None:
+        return 0.0
 
-    for game in history:
-        if (
-            not isinstance(game, dict)
-            or not game.get("game_id")
+    return dt.timestamp()
+
+
+# =====================================================================
+# REQUEST CANDLES
+# =====================================================================
+
+def request_candles(
+    start_dt,
+    end_dt
+):
+
+    url = (
+        f"{BASE_URL}"
+        f"/api/v1/assets/"
+        f"{ASSET_ID}/candles"
+    )
+
+    params = {
+        "from": format_api_time(
+            start_dt
+        ),
+        "to": format_api_time(
+            end_dt
+        ),
+        "detalization": DETAILIZATION,
+    }
+
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1
+    ):
+
+        try:
+
+            logger.info(
+                "Запрос свечей: %s -> %s",
+                format_api_time(start_dt),
+                format_api_time(end_dt),
+            )
+
+            response = session.get(
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            logger.info(
+                "HTTP %s | %.2f KB",
+                response.status_code,
+                len(response.content) / 1024,
+            )
+
+            if response.status_code != 200:
+
+                logger.warning(
+                    f"⚠️ HTTP {response.status_code}"
+                )
+
+                if attempt < MAX_RETRIES:
+
+                    time.sleep(
+                        2 * attempt
+                    )
+
+                    continue
+
+                return []
+
+            try:
+
+                result = response.json()
+
+            except Exception:
+
+                logger.error(
+                    "❌ Не удалось разобрать JSON"
+                )
+
+                return []
+
+            if "errors" in result:
+
+                logger.error(
+                    f"❌ API ошибка: "
+                    f"{result['errors']}"
+                )
+
+                return []
+
+            data = result.get(
+                "data"
+            )
+
+            if not isinstance(
+                data,
+                list
+            ):
+
+                logger.warning(
+                    "⚠️ API не вернул data"
+                )
+
+                return []
+
+            logger.info(
+                f"Получено свечей: "
+                f"{len(data)}"
+            )
+
+            return data
+
+        except requests.RequestException as e:
+
+            logger.warning(
+                f"⚠️ HTTP ошибка: {e}"
+            )
+
+            if attempt < MAX_RETRIES:
+
+                time.sleep(
+                    2 * attempt
+                )
+
+                continue
+
+            return []
+
+        except Exception:
+
+            logger.exception(
+                "❌ Ошибка запроса"
+            )
+
+            return []
+
+    return []
+
+
+# =====================================================================
+# NORMALIZE CANDLES
+# =====================================================================
+
+def normalize_candles(raw_candles):
+
+    result = []
+
+    for item in raw_candles:
+
+        if not isinstance(
+            item,
+            dict
         ):
             continue
 
-        dt = parse_history_timestamp(game)
-
-        if dt is not None and dt >= cutoff:
-            clean.append(game)
-
-    clean.sort(
-        key=lambda g: (
-            parse_history_timestamp(g)
-            or now
-        )
-    )
-
-    changed = len(clean) != len(history)
-
-    history = clean
-
-    if changed and save:
-        atomic_save_json(
-            DATA_FILE,
-            history
+        candle_time = item.get(
+            "time"
         )
 
-        print(
-            f"♻️ История очищена по времени: "
-            f"осталось {len(history)} игр "
-            f"за {HISTORY_HOURS}ч",
-            flush=True
-        )
-
-    return changed
-
-
-def load_history():
-    global history
-
-    data = load_json_file(
-        DATA_FILE,
-        []
-    )
-
-    if not isinstance(data, list):
-        data = []
-
-    history = [
-        g for g in data
-        if isinstance(g, dict)
-        and g.get("game_id")
-    ]
-
-    # ---------------------------------------------------------------
-    # Восстанавливаем game_tags из уже сохраненной истории.
-    # ---------------------------------------------------------------
-
-    for game in history:
-
-        gid = str(
-            game.get("game_id", "")
-        )
-
-        if not gid:
-            continue
-
-        tags = (
-            game.get("forecast_types")
-            or game.get("tags")
-            or []
-        )
-
-        if isinstance(tags, str):
-            tags = [tags]
-
-        valid_tags = {
-            str(tag).upper()
-            for tag in tags
-            if str(tag).upper() in FORECAST_TYPES
-        }
-
-        if valid_tags:
-            game_tags[gid] = valid_tags
-
-    cleanup_history_by_time(
-        save=False
-    )
-
-    atomic_save_json(
-        DATA_FILE,
-        history
-    )
-
-    return history
-
-
-def load_predictions():
-    data = load_json_file(
-        PREDICTIONS_FILE,
-        []
-    )
-
-    return data if isinstance(data, list) else []
-
-
-def find_game_index(gid):
-    gid = str(gid)
-
-    for i, game in enumerate(history):
-        if str(game.get("game_id")) == gid:
-            return i
-
-    return -1
-
-
-def game_exists(gid):
-    return find_game_index(gid) != -1
-
-
-# =====================================================================
-# TAG HELPERS
-# =====================================================================
-
-def normalize_forecast_tags(tags):
-    """
-    Оставляет только R/G/O/X.
-    """
-
-    if not tags:
-        return set()
-
-    if isinstance(tags, str):
-        tags = [tags]
-
-    result = set()
-
-    for tag in tags:
-
-        tag = str(tag).strip().upper().lstrip("#")
-
-        if tag in FORECAST_TYPES:
-            result.add(tag)
-
-    return result
-
-
-def get_record_forecast_types(record):
-    """
-    Возвращает типы прогноза конкретной игры.
-    """
-
-    tags = (
-        record.get("forecast_types")
-        or record.get("tags")
-        or []
-    )
-
-    return normalize_forecast_tags(tags)
-
-
-def record_supports_type(record, forecast_type):
-    """
-    True только если игра относится к нужному типу.
-
-    Например:
-        запись #R #O
-        поддерживает R
-        поддерживает O
-        НЕ поддерживает G
-        НЕ поддерживает X
-    """
-
-    if not forecast_type:
-        return True
-
-    forecast_type = str(
-        forecast_type
-    ).upper().lstrip("#")
-
-    return forecast_type in get_record_forecast_types(
-        record
-    )
-
-
-def attach_tags_to_history(game_id, tags):
-    """
-    Привязывает Telegram-теги к истории по точному ID.
-
-    API тегов не знает.
-    Telegram знает.
-    """
-
-    global history
-    global game_tags
-
-    gid = str(game_id)
-
-    normalized = normalize_forecast_tags(tags)
-
-    if not gid or not normalized:
-        return False
-
-    old_tags = game_tags.get(
-        gid,
-        set()
-    )
-
-    merged_tags = (
-        set(old_tags)
-        | set(normalized)
-    )
-
-    game_tags[gid] = merged_tags
-
-    idx = find_game_index(gid)
-
-    if idx == -1:
-        return False
-
-    record = history[idx]
-
-    current = get_record_forecast_types(
-        record
-    )
-
-    final_tags = (
-        current
-        | merged_tags
-    )
-
-    record["forecast_types"] = sorted(
-        final_tags
-    )
-
-    # Оставляем tags тоже для совместимости.
-    record["tags"] = sorted(
-        final_tags
-    )
-
-    atomic_save_json(
-        DATA_FILE,
-        history
-    )
-
-    print(
-        f"🏷️ Теги обновлены | "
-        f"ID={gid} | "
-        f"#{', #'.join(sorted(final_tags))}",
-        flush=True
-    )
-
-    return True
-
-
-def get_tags_for_game(game_id):
-    return sorted(
-        game_tags.get(
-            str(game_id),
-            set()
-        )
-    )
-
-
-# =====================================================================
-# DEEP PARSING
-# =====================================================================
-
-def deep_find_value(obj, keys):
-    wanted = {
-        str(x).lower()
-        for x in keys
-    }
-
-    if isinstance(obj, dict):
-
-        for k, v in obj.items():
-            if str(k).lower() in wanted:
-                return v
-
-        for v in obj.values():
-            result = deep_find_value(
-                v,
-                keys
-            )
-
-            if result is not None:
-                return result
-
-    elif isinstance(obj, list):
-
-        for item in obj:
-            result = deep_find_value(
-                item,
-                keys
-            )
-
-            if result is not None:
-                return result
-
-    return None
-
-
-def extract_card_from_dict(obj):
-    if not isinstance(obj, dict):
-        return None
-
-    rank = None
-    suit = None
-
-    rank_keys = {
-        "rank",
-        "value",
-        "v",
-        "cardvalue",
-        "card_value",
-        "nominal",
-        "denomination"
-    }
-
-    suit_keys = {
-        "suit",
-        "s",
-        "card_suit",
-        "cardsuit",
-        "mast",
-        "color"
-    }
-
-    for k, v in obj.items():
-
-        kl = str(k).strip().lower()
-
-        if kl in rank_keys:
-            r = normalize_rank(v)
-
-            if r:
-                rank = r
-
-        if kl in suit_keys:
-            s = normalize_suit(v)
-
-            if s:
-                suit = s
-
-    if rank and suit:
-        return {
-            "rank": rank,
-            "suit": f"{suit}\ufe0f"
-        }
-
-    return None
-
-
-def classify_key(key):
-    key = str(key).strip().lower()
-
-    if (
-        key in [
-            "p",
-            "pcards",
-            "playercards"
-        ]
-        or key.startswith("player")
-        or "playercard" in key
-    ):
-        return "player"
-
-    if (
-        key in [
-            "d",
-            "dcards",
-            "dealercards"
-        ]
-        or key.startswith("dealer")
-        or "dealercard" in key
-    ):
-        return "dealer"
-
-    return None
-
-
-def find_cards_recursive(
-    obj,
-    context=None,
-    player=None,
-    dealer=None
-):
-    if player is None:
-        player = []
-
-    if dealer is None:
-        dealer = []
-
-    if isinstance(obj, dict):
-
-        own = extract_card_from_dict(obj)
-
-        if own:
-            if context == "player":
-                player.append(own)
-
-            elif context == "dealer":
-                dealer.append(own)
-
-        for k, v in obj.items():
-
-            ctx = context
-
-            detected = classify_key(k)
-
-            if detected:
-                ctx = detected
-
-            kl = str(k).strip().lower()
-
-            if kl in {
-                "p",
-                "p1",
-                "p2",
-                "p3",
-                "p4",
-                "p5",
-                "p6",
-                "p7",
-                "p8",
-                "p9"
-            }:
-                ctx = "player"
-
-            if kl in {
-                "d",
-                "d1",
-                "d2",
-                "d3",
-                "d4",
-                "d5",
-                "d6",
-                "d7",
-                "d8",
-                "d9"
-            }:
-                ctx = "dealer"
-
-            find_cards_recursive(
-                v,
-                ctx,
-                player,
-                dealer
-            )
-
-    elif isinstance(obj, list):
-
-        for item in obj:
-            find_cards_recursive(
-                item,
-                context,
-                player,
-                dealer
-            )
-
-    return player, dealer
-
-
-def clean_cards(cards):
-    result = []
-    seen = set()
-
-    for card in cards:
-
-        if not card:
-            continue
-
-        rank = normalize_rank(
-            card.get("rank")
-        )
-
-        suit = normalize_suit(
-            card.get("suit")
-        )
-
-        if not rank or not suit:
-            continue
-
-        key = f"{rank}{suit}"
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        result.append({
-            "rank": rank,
-            "suit": f"{suit}\ufe0f"
-        })
-
-    return result
-
-
-# =====================================================================
-# PARSE GAME
-# =====================================================================
-
-def get_cards_from_api_value(value):
-    """
-    Преобразует P1/P2 из SC -> S
-    в список словарей rank/suit.
-    """
-
-    if not value or value == "[]":
-        return []
-
-    try:
-        cards = (
-            json.loads(value)
-            if isinstance(value, str)
-            else value
-        )
-
-    except Exception:
-        return []
-
-    if not isinstance(cards, list):
-        return []
-
-    result = []
-
-    suit_map = {
-        0: "♠️",
-        1: "♣️",
-        2: "♦️",
-        3: "♥️"
-    }
-
-    rank_map = {
-        1: "A",
-        6: "6",
-        7: "7",
-        8: "8",
-        9: "9",
-        10: "10",
-        11: "J",
-        12: "Q",
-        13: "K",
-        14: "A"
-    }
-
-    for card in cards:
-
-        if not isinstance(card, dict):
+        if not candle_time:
             continue
 
         try:
-            cs = int(card.get("CS"))
-            cv = int(card.get("CV"))
+
+            open_price = float(
+                item["open"]
+            )
+
+            high_price = float(
+                item["high"]
+            )
+
+            low_price = float(
+                item["low"]
+            )
+
+            close_price = float(
+                item["close"]
+            )
 
         except (
+            KeyError,
             TypeError,
             ValueError
         ):
+
             continue
 
-        suit = suit_map.get(cs)
-        rank = rank_map.get(cv)
+        timestamp = timestamp_from_api_time(
+            candle_time
+        )
 
-        if rank and suit:
-            result.append({
-                "rank": rank,
-                "suit": suit
-            })
+        if timestamp <= 0:
+            continue
+
+        result.append(
+            {
+                "asset_id": ASSET_ID,
+                "time": candle_time,
+                "timestamp": timestamp,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+            }
+        )
 
     return result
 
 
-def extract_game_sc(raw):
-    """
-    Достаёт P1, P2 и STATE
-    напрямую из Value -> SC -> S.
-    """
+# =====================================================================
+# SAVE CANDLES
+# =====================================================================
 
-    if not isinstance(raw, dict):
-        return [], [], None
+def save_candles(candles):
 
-    root = raw.get(
-        "Value",
+    if not candles:
+        return 0
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    saved = 0
+
+    try:
+
+        for candle in candles:
+
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO candles (
+                    asset_id,
+                    time,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candle["asset_id"],
+                    candle["time"],
+                    candle["timestamp"],
+                    candle["open"],
+                    candle["high"],
+                    candle["low"],
+                    candle["close"],
+                ),
+            )
+
+            saved += 1
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+    return saved
+
+
+# =====================================================================
+# DATABASE STATS
+# =====================================================================
+
+def get_database_stats():
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*),
+            MIN(time),
+            MAX(time)
+        FROM candles
+        WHERE asset_id = ?
+        """,
+        (
+            ASSET_ID,
+        ),
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    if not row:
+
+        return (
+            0,
+            None,
+            None,
+        )
+
+    return (
+        row[0],
+        row[1],
+        row[2],
+    )
+
+
+# =====================================================================
+# LOAD CANDLES FROM DATABASE
+# =====================================================================
+
+def load_candles_from_database():
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            time,
+            timestamp,
+            open,
+            high,
+            low,
+            close
+        FROM candles
+        WHERE asset_id = ?
+        ORDER BY timestamp ASC
+        """,
+        (
+            ASSET_ID,
+        ),
+    )
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    candles = []
+
+    for row in rows:
+
+        candles.append(
+            {
+                "time": row[0],
+                "timestamp": row[1],
+                "open": row[2],
+                "high": row[3],
+                "low": row[4],
+                "close": row[5],
+            }
+        )
+
+    return candles
+
+
+# =====================================================================
+# DOWNLOAD HISTORY
+# =====================================================================
+
+def download_history():
+
+    count, _, _ = get_database_stats()
+
+    if count > 0:
+
+        logger.info(
+            f"📚 База уже содержит "
+            f"{count} свечей"
+        )
+
+        return
+
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("📥 ПЕРВАЯ ЗАГРУЗКА ИСТОРИИ")
+    logger.info("=" * 70)
+
+    end_dt = utc_now()
+
+    start_dt = (
+        end_dt
+        - timedelta(
+            hours=HISTORY_HOURS
+        )
+    )
+
+    current = start_dt
+
+    total_saved = 0
+    chunk_number = 0
+
+    while current < end_dt:
+
+        chunk_number += 1
+
+        chunk_end = (
+            current
+            + timedelta(
+                minutes=CHUNK_MINUTES
+            )
+        )
+
+        if chunk_end > end_dt:
+
+            chunk_end = end_dt
+
+        logger.info("")
+        logger.info(
+            f"📦 ЧАНК #{chunk_number}"
+        )
+
+        raw = request_candles(
+            current,
+            chunk_end
+        )
+
+        candles = normalize_candles(
+            raw
+        )
+
+        saved = save_candles(
+            candles
+        )
+
+        total_saved += saved
+
+        logger.info(
+            f"💾 Сохранено: {saved}"
+        )
+
+        current = chunk_end
+
+        time.sleep(0.3)
+
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info(
+        f"✅ ИСТОРИЯ ЗАГРУЖЕНА"
+    )
+    logger.info(
+        f"💾 Всего обработано: "
+        f"{total_saved}"
+    )
+    logger.info("=" * 70)
+
+
+# =====================================================================
+# UPDATE RECENT CANDLES
+# =====================================================================
+
+def update_recent_candles():
+
+    end_dt = utc_now()
+
+    start_dt = (
+        end_dt
+        - timedelta(
+            minutes=LIVE_WINDOW_MINUTES
+        )
+    )
+
+    raw = request_candles(
+        start_dt,
+        end_dt
+    )
+
+    if not raw:
+
+        logger.warning(
+            "⚠️ Новые свечи не получены"
+        )
+
+        return 0
+
+    candles = normalize_candles(
         raw
     )
 
-    if not isinstance(root, dict):
-        return [], [], None
-
-    sc = root.get(
-        "SC",
-        {}
+    saved = save_candles(
+        candles
     )
 
-    items = (
-        sc.get("S", [])
-        if isinstance(sc, dict)
-        else []
+    return saved
+
+
+# =====================================================================
+# CANDLE DIRECTION
+# =====================================================================
+
+def candle_direction(candle):
+
+    open_price = candle.get(
+        "open"
     )
 
-    if not isinstance(items, list):
-        return [], [], None
-
-    p1_value = None
-    p2_value = None
-    state = None
-
-    for item in items:
-
-        if not isinstance(item, dict):
-            continue
-
-        key = str(
-            item.get("Key", "")
-        ).upper()
-
-        value = item.get("Value")
-
-        if key == "P1":
-            p1_value = value
-
-        elif key == "P2":
-            p2_value = value
-
-        elif key == "STATE":
-            state = (
-                str(value)
-                if value is not None
-                else None
-            )
-
-    return (
-        get_cards_from_api_value(p1_value),
-        get_cards_from_api_value(p2_value),
-        state
+    close_price = candle.get(
+        "close"
     )
 
-
-def parse_game_data(game_id, raw):
-    """
-    Парсит завершённую игру
-    напрямую из API SC -> S -> P1/P2/STATE.
-
-    Хэштеги НЕ берутся из API.
-    Они добавляются отдельно из Telegram через game_tags.
-    """
-
-    if not raw:
-        return None
-
-    player, dealer, state = extract_game_sc(raw)
-
-    if str(state) != "5":
-        return None
-
-    if not player and not dealer:
-        return None
-
-    now = datetime.now(MOSCOW_TZ)
-
-    all_cards = []
-    sequence = []
-    pos = 1
-
-    for i in range(
-        max(
-            len(player),
-            len(dealer)
-        )
+    if (
+        open_price is None
+        or close_price is None
     ):
 
-        if i < len(player):
-
-            card = player[i]
-
-            all_cards.append(card)
-
-            sequence.append({
-                "position": pos,
-                "who": "P",
-                "rank": card["rank"],
-                "suit": card["suit"]
-            })
-
-            pos += 1
-
-        if i < len(dealer):
-
-            card = dealer[i]
-
-            all_cards.append(card)
-
-            sequence.append({
-                "position": pos,
-                "who": "D",
-                "rank": card["rank"],
-                "suit": card["suit"]
-            })
-
-            pos += 1
-
-    gid = str(game_id)
-
-    tags = get_tags_for_game(gid)
-
-    return {
-        "game_id": gid,
-
-        "timestamp": now.isoformat(),
-
-        "timestamp_msk": (
-            now.strftime("%H:%M:%S.%f")[:-3]
-        ),
-
-        "state": state,
-
-        "player_cards": player,
-        "dealer_cards": dealer,
-
-        "player_suits": [
-            c["suit"]
-            for c in player
-        ],
-
-        "player_ranks": [
-            c["rank"]
-            for c in player
-        ],
-
-        "dealer_suits": [
-            c["suit"]
-            for c in dealer
-        ],
-
-        "dealer_ranks": [
-            c["rank"]
-            for c in dealer
-        ],
-
-        "all_suits": [
-            c["suit"]
-            for c in all_cards
-        ],
-
-        "all_ranks": [
-            c["rank"]
-            for c in all_cards
-        ],
-
-        "sequence": sequence,
-
-        "total_cards": len(all_cards),
-
-        "first_player_card": (
-            player[0]
-            if player
-            else None
-        ),
-
-        "id_last_digit": gid[-1],
-
-        "id_last_two": (
-            gid[-2:]
-            if len(gid) >= 2
-            else ""
-        ),
-
-        # -----------------------------------------------------------
-        # Telegram-теги.
-        # Если Telegram ещё не прислал игру,
-        # список будет пустым и позже будет дополнен по ID.
-        # -----------------------------------------------------------
-
-        "forecast_types": tags,
-        "tags": tags
-    }
-
-
-# =====================================================================
-# MERGE / SAVE GAME
-# =====================================================================
-
-def add_or_update_game(game):
-    global history
-
-    gid = str(
-        game.get("game_id") or ""
-    )
-
-    if not gid:
-        return False
-
-    cleanup_history_by_time(
-        save=False
-    )
-
-    idx = find_game_index(gid)
-
-    if idx != -1:
-
-        # -----------------------------------------------------------
-        # Если игра уже есть, но Telegram позже дал теги,
-        # обновляем существующую запись.
-        # -----------------------------------------------------------
-
-        tags = normalize_forecast_tags(
-            game.get("forecast_types")
-            or game.get("tags")
-            or []
-        )
-
-        if tags:
-
-            old_tags = get_record_forecast_types(
-                history[idx]
-            )
-
-            final_tags = old_tags | tags
-
-            history[idx]["forecast_types"] = sorted(
-                final_tags
-            )
-
-            history[idx]["tags"] = sorted(
-                final_tags
-            )
-
-            game_tags[gid] = final_tags
-
-            atomic_save_json(
-                DATA_FILE,
-                history
-            )
-
-        return False
-
-    history.append(game)
-
-    history.sort(
-        key=lambda g: (
-            parse_history_timestamp(g)
-            or datetime.now(MOSCOW_TZ)
-        )
-    )
-
-    cleanup_history_by_time(
-        save=False
-    )
-
-    atomic_save_json(
-        DATA_FILE,
-        history
-    )
-
-    tags = get_record_forecast_types(
-        game
-    )
-
-    tag_text = (
-        ", ".join(
-            f"#{x}"
-            for x in tags
-        )
-        if tags
-        else "нет"
-    )
-
-    print(
-        f"💾 Новая завершённая игра | "
-        f"ID={gid} | "
-        f"P1={len(game.get('player_cards', []))} | "
-        f"P2={len(game.get('dealer_cards', []))} | "
-        f"ТИПЫ={tag_text} | "
-        f"База={len(history)} игр/"
-        f"{HISTORY_HOURS}ч",
-        flush=True
-    )
-
-    return True
-
-
-# =====================================================================
-# TARGET CARDS FROM RECORD
-# =====================================================================
-
-def get_target_cards_from_record(record):
-    result = []
-
-    all_cards = (
-        record.get("player_cards", [])
-        + record.get("dealer_cards", [])
-    )
-
-    for card in all_cards:
-
-        target = card_dict_to_target(card)
-
-        if target:
-            result.append(target)
-
-    return result
-
-
-# =====================================================================
-# DISTRIBUTION HELPERS
-# =====================================================================
-
-def normalize_distribution(counter):
-    if not counter:
-        return {}
-
-    total = sum(counter.values())
-
-    if total <= 0:
-        return {}
-
-    return {
-        card: count / total
-        for card, count in counter.items()
-    }
-
-
-def get_top_from_distribution(dist):
-    if not dist:
-        return None, 0.0
-
-    sorted_items = sorted(
-        dist.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    return sorted_items[0]
-
-
-# =====================================================================
-# METHOD 1 — MILLISECONDS
-# =====================================================================
-
-def method_milliseconds(
-    timestamp_msk,
-    forecast_type=None
-):
-    if not timestamp_msk:
-        return {}
-
-    try:
-        if "." not in timestamp_msk:
-            return {}
-
-        target_ms = int(
-            timestamp_msk.split(".")[1]
-        )
-
-    except:
-        return {}
-
-    counter = Counter()
-    matches = 0
-
-    for record in history:
-
-        # -----------------------------------------------------------
-        # КЛЮЧЕВОЕ:
-        # для #R смотрим только #R,
-        # для #G только #G и т.д.
-        # -----------------------------------------------------------
-
-        if not record_supports_type(
-            record,
-            forecast_type
-        ):
-            continue
-
-        record_time = record.get(
-            "timestamp_msk",
-            ""
-        )
-
-        if "." not in record_time:
-            continue
-
-        try:
-            ms = int(
-                record_time.split(".")[1]
-            )
-
-        except:
-            continue
-
-        if ms != target_ms:
-            continue
-
-        cards = get_target_cards_from_record(
-            record
-        )
-
-        if not cards:
-            continue
-
-        matches += 1
-
-        for card in cards:
-            counter[card] += 1
-
-    if matches < MIN_MS_MATCHES:
-        return {}
-
-    return {
-        "name": "MS",
-        "weight": WEIGHT_MS,
-        "matches": matches,
-        "distribution": normalize_distribution(counter)
-    }
-
-
-# =====================================================================
-# METHOD 2 — LAST ID DIGIT
-# =====================================================================
-
-def method_id1(
-    game_id,
-    forecast_type=None
-):
-    game_id = str(game_id)
-
-    if not game_id:
-        return {}
-
-    digit = game_id[-1]
-
-    counter = Counter()
-    matches = 0
-
-    for record in history:
-
-        if not record_supports_type(
-            record,
-            forecast_type
-        ):
-            continue
-
-        rid = str(
-            record.get("game_id", "")
-        )
-
-        if not rid:
-            continue
-
-        if rid == game_id:
-            continue
-
-        if rid[-1] != digit:
-            continue
-
-        cards = get_target_cards_from_record(
-            record
-        )
-
-        if not cards:
-            continue
-
-        matches += 1
-
-        for card in cards:
-            counter[card] += 1
-
-    if matches < MIN_ID1_MATCHES:
-        return {}
-
-    return {
-        "name": "ID1",
-        "weight": WEIGHT_ID1,
-        "matches": matches,
-        "distribution": normalize_distribution(counter)
-    }
-
-
-# =====================================================================
-# METHOD 3 — LAST 2 ID DIGITS
-# =====================================================================
-
-def method_id2(
-    game_id,
-    forecast_type=None
-):
-    game_id = str(game_id)
-
-    if len(game_id) < 2:
-        return {}
-
-    suffix = game_id[-2:]
-
-    counter = Counter()
-    matches = 0
-
-    for record in history:
-
-        if not record_supports_type(
-            record,
-            forecast_type
-        ):
-            continue
-
-        rid = str(
-            record.get("game_id", "")
-        )
-
-        if len(rid) < 2:
-            continue
-
-        if rid == game_id:
-            continue
-
-        if rid[-2:] != suffix:
-            continue
-
-        cards = get_target_cards_from_record(
-            record
-        )
-
-        if not cards:
-            continue
-
-        matches += 1
-
-        for card in cards:
-            counter[card] += 1
-
-    if matches < MIN_ID2_MATCHES:
-        return {}
-
-    return {
-        "name": "ID2",
-        "weight": WEIGHT_ID2,
-        "matches": matches,
-        "distribution": normalize_distribution(counter)
-    }
-
-
-# =====================================================================
-# METHOD 4 — LOCAL FREQUENCY
-# =====================================================================
-
-def method_frequency(
-    forecast_type=None
-):
-    counter = Counter()
-
-    # Берём последние 150 ЗАПИСЕЙ,
-    # но из них только нужный тип.
-    recent = history[-150:]
-
-    matches = 0
-
-    for record in recent:
-
-        if not record_supports_type(
-            record,
-            forecast_type
-        ):
-            continue
-
-        cards = get_target_cards_from_record(
-            record
-        )
-
-        if not cards:
-            continue
-
-        matches += 1
-
-        for card in cards:
-            counter[card] += 1
-
-    if not counter:
-        return {}
-
-    return {
-        "name": "FREQ",
-        "weight": WEIGHT_FREQUENCY,
-        "matches": matches,
-        "distribution": normalize_distribution(counter)
-    }
-
-
-# =====================================================================
-# METHOD 5 — SEQUENCE PATTERN
-# =====================================================================
-
-def get_game_signature(game):
-    sequence = game.get(
-        "sequence",
-        []
-    )
-
-    if not sequence:
-        return ()
-
-    signature = []
-
-    for item in sequence[:4]:
-
-        who = item.get(
-            "who",
-            ""
-        )
-
-        rank = normalize_rank(
-            item.get("rank")
-        )
-
-        if who and rank:
-            signature.append(
-                f"{who}:{rank}"
-            )
-
-    return tuple(signature)
-
-
-def method_sequence(
-    forecast_type=None
-):
-    # ---------------------------------------------------------------
-    # Последние игры для поиска паттерна тоже фильтруем по типу.
-    # ---------------------------------------------------------------
-
-    typed_history = [
-        record
-        for record in history
-        if record_supports_type(
-            record,
-            forecast_type
-        )
-    ]
-
-    if len(typed_history) < 10:
-        return {}
-
-    recent = typed_history[-5:]
-
-    if not recent:
-        return {}
-
-    pattern_counter = Counter()
-
-    for g in recent:
-
-        sig = get_game_signature(g)
-
-        if sig:
-            pattern_counter[sig] += 1
-
-    if not pattern_counter:
-        return {}
-
-    counter = Counter()
-    matches = 0
-
-    # Не используем последние 5 в качестве обучающих результатов.
-    for record in typed_history[:-5]:
-
-        sig = get_game_signature(record)
-
-        if not sig:
-            continue
-
-        if sig not in pattern_counter:
-            continue
-
-        cards = get_target_cards_from_record(
-            record
-        )
-
-        if not cards:
-            continue
-
-        matches += 1
-
-        for card in cards:
-            counter[card] += 1
-
-    if matches < MIN_SEQUENCE_MATCHES:
-        return {}
-
-    return {
-        "name": "SEQ",
-        "weight": WEIGHT_SEQUENCE,
-        "matches": matches,
-        "distribution": normalize_distribution(counter)
-    }
-
-
-# =====================================================================
-# HYBRID ENGINE
-# =====================================================================
-
-def build_hybrid_prediction(
-    game_id,
-    timestamp_msk,
-    forecast_type
-):
-    results = [
-        method_milliseconds(
-            timestamp_msk,
-            forecast_type
-        ),
-
-        method_id1(
-            game_id,
-            forecast_type
-        ),
-
-        method_id2(
-            game_id,
-            forecast_type
-        ),
-
-        method_frequency(
-            forecast_type
-        ),
-
-        method_sequence(
-            forecast_type
-        )
-    ]
-
-    active = []
-
-    scores = defaultdict(float)
-
-    method_details = {}
-
-    for result in results:
-
-        if not result:
-            continue
-
-        dist = result.get(
-            "distribution",
-            {}
-        )
-
-        if not dist:
-            continue
-
-        name = result["name"]
-        weight = result["weight"]
-
-        top_card, top_prob = (
-            get_top_from_distribution(dist)
-        )
-
-        method_details[name] = {
-            "top": top_card,
-            "probability": top_prob,
-            "matches": result.get(
-                "matches",
-                0
-            )
-        }
-
-        active.append(name)
-
-        for card, probability in dist.items():
-            scores[card] += (
-                probability * weight
-            )
-
-    if len(active) < MIN_ACTIVE_METHODS:
-
-        print(
-            f"⏭️ [{forecast_type}] "
-            f"Недостаточно методов: "
-            f"{active}",
-            flush=True
-        )
-
         return None
 
-    if not scores:
-        return None
+    if close_price > open_price:
 
-    total_score = sum(
-        scores.values()
-    )
+        return "UP"
 
-    probabilities = {
-        card: score / total_score
-        for card, score in scores.items()
+    if close_price < open_price:
+
+        return "DOWN"
+
+    return "FLAT"
+
+
+# =====================================================================
+# BUILD DIRECTIONS
+# =====================================================================
+
+def build_directions(candles):
+
+    directions = []
+
+    for candle in candles:
+
+        direction = candle_direction(
+            candle
+        )
+
+        directions.append(
+            direction
+        )
+
+    return directions
+
+
+# =====================================================================
+# PATTERN TO TEXT
+# =====================================================================
+
+def pattern_to_text(pattern):
+
+    symbols = {
+        "UP": "🟢",
+        "DOWN": "🔴",
+        "FLAT": "⚪",
     }
 
-    ranking = sorted(
-        probabilities.items(),
-        key=lambda x: x[1],
-        reverse=True
+    return "".join(
+        symbols.get(
+            item,
+            "?"
+        )
+        for item in pattern
     )
-
-    if not ranking:
-        return None
-
-    best_card, best_probability = ranking[0]
-
-    second_card = None
-    second_probability = 0.0
-
-    if len(ranking) > 1:
-
-        second_card = ranking[1][0]
-        second_probability = ranking[1][1]
-
-    gap = (
-        best_probability
-        - second_probability
-    )
-
-    supporters = []
-
-    for name, info in method_details.items():
-
-        if info.get("top") == best_card:
-            supporters.append(name)
-
-    return {
-        "forecast_type": forecast_type,
-
-        "card": best_card,
-        "probability": best_probability,
-
-        "second_card": second_card,
-        "second_probability": second_probability,
-
-        "gap": gap,
-
-        "active_methods": active,
-
-        "supporters": supporters,
-
-        "method_details": method_details,
-
-        "ranking": ranking[:5]
-    }
 
 
 # =====================================================================
-# FILTER
+# FIND PATTERN MATCHES
 # =====================================================================
 
-def prediction_passes_filter(result):
-    if not result:
-        return False
-
-    probability = result.get(
-        "probability",
-        0
-    )
-
-    gap = result.get(
-        "gap",
-        0
-    )
-
-    supporters = result.get(
-        "supporters",
-        []
-    )
-
-    if probability < MIN_FORECAST_PROBABILITY:
-
-        print(
-            f"🚫 Лидер слабый: "
-            f"{probability:.1%}",
-            flush=True
-        )
-
-        return False
-
-    if gap < MIN_LEADER_GAP:
-
-        print(
-            f"🚫 Нет преимущества: "
-            f"gap={gap:.1%}",
-            flush=True
-        )
-
-        return False
-
-    if len(supporters) < MIN_ACTIVE_METHODS:
-
-        print(
-            f"🚫 Мало поддержки: "
-            f"{supporters}",
-            flush=True
-        )
-
-        return False
-
-    return True
-
-
-# =====================================================================
-# GAME NUMBER
-# =====================================================================
-
-def get_game_number():
-    now = datetime.now(
-        MOSCOW_TZ
-    )
-
-    start = now.replace(
-        hour=3,
-        minute=0,
-        second=0,
-        microsecond=0
-    )
-
-    if now < start:
-        start -= timedelta(
-            days=1
-        )
-
-    return (
-        int(
-            (now - start).total_seconds()
-            // 60
-        )
-        % 1440
-    ) + 1
-
-
-def add_game_offset(number, offset):
-    return (
-        (
-            int(number)
-            - 1
-            + int(offset)
-        )
-        % 1440
-    ) + 1
-
-
-# =====================================================================
-# TELEGRAM
-# =====================================================================
-
-def telegram_send(text, chat_id=None):
-    if not chat_id:
-        chat_id = CHANNEL_PROGNOZ
-
-    try:
-
-        response = SESSION.post(
-            f"{TELEGRAM_API}/sendMessage",
-
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            },
-
-            timeout=10
-        )
-
-        data = response.json()
-
-        if data.get("ok"):
-            return data["result"]["message_id"]
-
-        print(
-            f"❌ Telegram: {data}",
-            flush=True
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Telegram ошибка: {e}",
-            flush=True
-        )
-
-    return None
-
-
-def telegram_edit(
-    message_id,
-    text,
-    chat_id=None
+def find_pattern_matches(
+    directions,
+    pattern
 ):
-    if not message_id:
-        return False
 
-    if not chat_id:
-        chat_id = CHANNEL_PROGNOZ
+    matches = []
 
-    try:
-
-        response = SESSION.post(
-            f"{TELEGRAM_API}/editMessageText",
-
-            json={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "HTML"
-            },
-
-            timeout=10
-        )
-
-        return bool(
-            response.json().get("ok")
-        )
-
-    except:
-        return False
-
-
-# =====================================================================
-# MESSAGES
-# =====================================================================
-
-def make_prediction_message(entry):
-    result = entry["hybrid"]
-
-    forecast_type = entry.get(
-        "prediction_type",
-        "?"
+    pattern_length = len(
+        pattern
     )
 
-    card1 = result["card"]
-    prob1 = result["probability"]
-
-    card2 = (
-        result.get("second_card")
-        or "—"
+    search_end = (
+        len(directions)
+        - EXCLUDE_LAST
     )
 
-    prob2 = result.get(
-        "second_probability",
-        0.0
-    )
+    if search_end <= pattern_length:
 
-    text = (
-        f"🎯 #{forecast_type} | "
-        f"Игра: #N{entry['target_number']}\n"
-        f"🃏 {card1} — {prob1*100:.1f}%\n"
-        f"🥈 {card2} — {prob2*100:.1f}%"
-    )
+        return matches
 
-    return text
+    for i in range(
+        pattern_length,
+        search_end
+    ):
 
-
-# =====================================================================
-# PARSE TELEGRAM GAME MESSAGE
-# =====================================================================
-
-def parse_stats_message(text):
-    """
-    Универсальный парсер сообщения статистики.
-
-    Из Telegram берём:
-        #N
-        ID
-        #R
-        #G
-        #O
-        #X
-        карты
-
-    API здесь вообще не используется.
-    """
-
-    if not text:
-        return None
-
-    num_match = re.search(
-        r"#N(\d+)",
-        text
-    )
-
-    if not num_match:
-        return None
-
-    game_number = int(
-        num_match.group(1)
-    )
-
-    # ---------------------------------------------------------------
-    # ID
-    # Поддерживаем:
-    # (ID: 750598382)
-    # ID: 750598382
-    # ID=750598382
-    # ---------------------------------------------------------------
-
-    id_match = re.search(
-        r"\bID\s*[:=]\s*(\d+)",
-        text,
-        re.IGNORECASE
-    )
-
-    game_id = (
-        id_match.group(1)
-        if id_match
-        else None
-    )
-
-    # ---------------------------------------------------------------
-    # ВСЕ теги одновременно.
-    #
-    # Например:
-    # #R #G #O
-    #
-    # получим:
-    # {"R", "G", "O"}
-    # ---------------------------------------------------------------
-
-    tags = set(
-        re.findall(
-            r"#(R|G|O|X)\b",
-            text,
-            re.IGNORECASE
-        )
-    )
-
-    tags = {
-        tag.upper()
-        for tag in tags
-    }
-
-    # ---------------------------------------------------------------
-    # Определяем завершённую игру.
-    # ---------------------------------------------------------------
-
-    finished = bool(
-        re.search(
-            r"[✅🔰]",
-            text
-        )
-    )
-
-    # ---------------------------------------------------------------
-    # Ожидание игры.
-    # ---------------------------------------------------------------
-
-    waiting = (
-        "⏳ Ожидание игры"
-        in text
-    )
-
-    # ---------------------------------------------------------------
-    # Карты.
-    # ---------------------------------------------------------------
-
-    found = re.findall(
-        r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?",
-        text
-    )
-
-    if not found:
-
-        found = re.findall(
-            r"(10|[2-9AJQK])([♠♣♦♥])",
-            text
-        )
-
-    cards = [
-        f"{rank}{suit}\ufe0f"
-        for rank, suit in found
-    ]
-
-    # ---------------------------------------------------------------
-    # Запасной вариант — содержимое скобок.
-    # ---------------------------------------------------------------
-
-    if not cards:
-
-        matches = re.findall(
-            r"\((.*?)\)",
-            text
-        )
-
-        for inner in matches:
-
-            found_inner = re.findall(
-                r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?",
-                inner
-            )
-
-            for rank, suit in found_inner:
-
-                cards.append(
-                    f"{rank}{suit}\ufe0f"
-                )
-
-    cards = list(
-        dict.fromkeys(cards)
-    )
-
-    return {
-        "game_number": game_number,
-
-        "game_id": game_id,
-
-        "forecast_types": sorted(tags),
-
-        "cards": cards,
-
-        "finished": finished,
-
-        "waiting": waiting,
-
-        "text": text
-    }
-
-
-# =====================================================================
-# OLD COMPATIBILITY FUNCTION
-# =====================================================================
-
-def parse_cards_from_message(text):
-    """
-    Оставляем старое имя функции,
-    но теперь возвращаем расширенную информацию.
-    """
-
-    parsed = parse_stats_message(
-        text
-    )
-
-    if not parsed:
-        return None
-
-    if not parsed.get("finished"):
-        return None
-
-    return parsed
-
-
-# =====================================================================
-# TELEGRAM RESULT CACHE
-# =====================================================================
-
-def cache_finished_game(parsed):
-    """
-    Сохраняет завершённую Telegram-игру в кэш.
-
-    Один #N потенциально может иметь разные ID,
-    поэтому внутри #N храним список записей.
-    """
-
-    if not parsed:
-        return
-
-    if not parsed.get("finished"):
-        return
-
-    game_number = parsed.get(
-        "game_number"
-    )
-
-    if game_number is None:
-        return
-
-    game_id = parsed.get(
-        "game_id"
-    )
-
-    tags = normalize_forecast_tags(
-        parsed.get("forecast_types", [])
-    )
-
-    record = {
-        "game_number": game_number,
-
-        "game_id": (
-            str(game_id)
-            if game_id
-            else None
-        ),
-
-        "forecast_types": sorted(tags),
-
-        "cards": parsed.get(
-            "cards",
-            []
-        ),
-
-        "text": parsed.get(
-            "text",
-            ""
-        )
-    }
-
-    bucket = games_cache.setdefault(
-        game_number,
-        []
-    )
-
-    # ---------------------------------------------------------------
-    # Обновляем запись по точному ID,
-    # а не создаём дубликат.
-    # ---------------------------------------------------------------
-
-    replaced = False
-
-    if game_id:
-
-        for i, old in enumerate(bucket):
-
-            if str(
-                old.get("game_id")
-            ) == str(game_id):
-
-                bucket[i] = record
-                replaced = True
-                break
-
-    # Если ID нет — используем текст как запасной ключ.
-    if not replaced and not game_id:
-
-        for i, old in enumerate(bucket):
-
-            if old.get("text") == record["text"]:
-
-                bucket[i] = record
-                replaced = True
-                break
-
-    if not replaced:
-        bucket.append(record)
-
-    # ---------------------------------------------------------------
-    # Обновляем глобальное соответствие ID -> теги.
-    # ---------------------------------------------------------------
-
-    if game_id and tags:
-
-        gid = str(game_id)
-
-        old_tags = game_tags.get(
-            gid,
-            set()
-        )
-
-        game_tags[gid] = (
-            old_tags
-            | tags
-        )
-
-        attach_tags_to_history(
-            gid,
-            tags
-        )
-
-    print(
-        f"💾 КЭШ: "
-        f"#N{game_number} | "
-        f"ID={game_id or 'нет'} | "
-        f"карты={parsed.get('cards', [])} | "
-        f"типы={sorted(tags) if tags else []}",
-        flush=True
-    )
-
-
-# =====================================================================
-# OFFSET
-# =====================================================================
-
-def get_offset():
-    try:
-
-        if os.path.exists(
-            OFFSET_FILE
-        ):
-
-            with open(
-                OFFSET_FILE,
-                "r"
-            ) as f:
-
-                return int(
-                    f.read().strip()
-                )
-
-    except:
-        pass
-
-    return 0
-
-
-def save_offset(offset):
-    try:
-
-        with open(
-            OFFSET_FILE,
-            "w"
-        ) as f:
-
-            f.write(
-                str(offset)
-            )
-
-    except:
-        pass
-
-
-# =====================================================================
-# API
-# =====================================================================
-
-def get_game_data(game_id):
-    """
-    Запрашивает API именно по переданному ID.
-    """
-
-    url = (
-        f"{BASE_URL}/service-api/"
-        "LiveFeed/GetGameZip"
-        f"?id={game_id}"
-        "&isSubGames=true"
-        "&GroupEvents=true"
-        "&countevents=250"
-        "&grMode=4"
-        "&partner=7"
-        "&topGroups="
-        "&country=190"
-        "&marketType=1"
-        "&isNewBuilder=true"
-    )
-
-    try:
-
-        response = SESSION.get(
-            url,
-            timeout=7
-        )
-
-        if response.status_code == 200:
-            return response.json()
-
-        print(
-            f"⚠️ API ID={game_id} "
-            f"HTTP={response.status_code}",
-            flush=True
-        )
-
-    except Exception as e:
-
-        print(
-            f"⚠️ Ошибка API ID={game_id}: {e}",
-            flush=True
-        )
-
-    return None
-
-
-# =====================================================================
-# ПРОВЕРКА ID ПЕРЕД ПРОГНОЗОМ
-# =====================================================================
-
-def check_target_game_before_prediction(game_id):
-    """
-    Проверяет ИМЕННО тот ID, который пришёл
-    из канала статистики.
-    """
-
-    game_id = str(game_id)
-
-    print(
-        f"🔎 Ищу ID={game_id} в API...",
-        flush=True
-    )
-
-    raw = get_game_data(game_id)
-
-    if not raw:
-
-        print(
-            f"🚫 ID={game_id} "
-            f"не найден в API — прогноз НЕ даём",
-            flush=True
-        )
-
-        return False
-
-    player, dealer, state = extract_game_sc(
-        raw
-    )
-
-    print(
-        f"🔎 API ID={game_id} | "
-        f"STATE={state} | "
-        f"P1={len(player)} | "
-        f"P2={len(dealer)}",
-        flush=True
-    )
-
-    if player or dealer:
-
-        print(
-            f"🚫 ID={game_id} уже НАЧАЛАСЬ "
-            f"| P1={len(player)} "
-            f"| P2={len(dealer)} "
-            f"| прогноз НЕ даём",
-            flush=True
-        )
-
-        return False
-
-    if str(state) in {
-        "4",
-        "5"
-    }:
-
-        print(
-            f"🚫 ID={game_id} уже "
-            f"в финальном состоянии "
-            f"STATE={state} — прогноз НЕ даём",
-            flush=True
-        )
-
-        return False
-
-    print(
-        f"✅ ID={game_id} найден в API "
-        f"и игра ЕЩЁ НЕ НАЧАЛАСЬ — "
-        f"даём прогноз",
-        flush=True
-    )
-
-    return True
-
-
-# =====================================================================
-# PROCESS TELEGRAM UPDATES
-# =====================================================================
-
-def process_telegram_updates(offset):
-    global predictions
-    global games_cache
-
-    if not CHANNEL_STATS:
-        return offset
-
-    try:
-
-        response = SESSION.get(
-            f"{TELEGRAM_API}/getUpdates",
-
-            params={
-                "offset": offset,
-                "timeout": 3,
-                "limit": 50
-            },
-
-            timeout=10
-        )
-
-        data = response.json()
-
-        if not data.get("ok"):
-            return offset
-
-        for update in data.get(
-            "result",
-            []
-        ):
-
-            update_id = update.get(
-                "update_id"
-            )
-
-            if update_id is not None:
-
-                offset = update_id + 1
-
-                save_offset(offset)
-
-            post = (
-                update.get("channel_post")
-                or update.get("edited_channel_post")
-            )
-
-            if not post:
-                continue
-
-            chat_id = str(
-                post.get(
-                    "chat",
-                    {}
-                ).get(
-                    "id",
-                    ""
-                )
-            )
-
-            if chat_id != str(
-                CHANNEL_STATS
-            ):
-                continue
-
-            text = post.get(
-                "text",
-                ""
-            )
-
-            # =======================================================
-            # ПАРСИМ ЛЮБОЕ СООБЩЕНИЕ СТАТИСТИКИ
-            # =======================================================
-
-            parsed = parse_stats_message(
-                text
-            )
-
-            if not parsed:
-                continue
-
-            game_id = parsed.get(
-                "game_id"
-            )
-
-            tags = normalize_forecast_tags(
-                parsed.get(
-                    "forecast_types",
-                    []
-                )
-            )
-
-            game_number = parsed.get(
-                "game_number"
-            )
-
-            # =======================================================
-            # СНАЧАЛА СОХРАНЯЕМ ТЕГИ ПО EXACT ID
-            #
-            # Даже если API уже успел записать игру,
-            # мы потом дополним существующую запись.
-            # =======================================================
-
-            if game_id and tags:
-
-                gid = str(game_id)
-
-                old_tags = game_tags.get(
-                    gid,
-                    set()
-                )
-
-                game_tags[gid] = (
-                    old_tags
-                    | tags
-                )
-
-                attach_tags_to_history(
-                    gid,
-                    tags
-                )
-
-                print(
-                    f"🏷️ Telegram ID={gid} -> "
-                    f"{sorted(game_tags[gid])}",
-                    flush=True
-                )
-
-            # =======================================================
-            # ЗАВЕРШЁННАЯ ИГРА -> КЭШ
-            # =======================================================
-
-            if parsed.get("finished"):
-
-                cache_finished_game(
-                    parsed
-                )
-
-            # =======================================================
-            # НЕ НОВАЯ ИГРА
-            # =======================================================
-
-            if not parsed.get("waiting"):
-                continue
-
-            # =======================================================
-            # ОЖИДАНИЕ ДОЛЖНО ИМЕТЬ ID
-            # =======================================================
-
-            if not game_id or game_number is None:
-
-                print(
-                    "⚠️ Ожидание игры без "
-                    "корректного ID/#N — пропуск",
-                    flush=True
-                )
-
-                continue
-
-            # =======================================================
-            # ОЖИДАНИЕ ДОЛЖНО ИМЕТЬ ХОТЯ БЫ ОДИН ТИП
-            #
-            # Например:
-            # #R #G #O
-            #
-            # создаст 3 независимых прогноза.
-            # =======================================================
-
-            if not tags:
-
-                print(
-                    f"⏭️ ID={game_id} "
-                    f"#N{game_number}: "
-                    f"нет #R/#G/#O/#X — прогноз НЕ даём",
-                    flush=True
-                )
-
-                continue
-
-            forecast_types = sorted(
-                tags
-            )
-
-            print(
-                f"\n🆕 НОВАЯ ИГРА: "
-                f"#N{game_number} | "
-                f"ID={game_id} | "
-                f"ТИПЫ={forecast_types}",
-                flush=True
-            )
-
-            # =======================================================
-            # ПРОВЕРЯЕМ ID ОДИН РАЗ.
-            # =======================================================
-
-            if not check_target_game_before_prediction(
-                game_id
-            ):
-                continue
-
-            # =======================================================
-            # ОТДЕЛЬНЫЙ ПРОГНОЗ НА КАЖДЫЙ ТЕГ
-            #
-            # #R #G #O -> 3 записи.
-            # =======================================================
-
-            for index, forecast_type in enumerate(
-                forecast_types
-            ):
-
-                # ---------------------------------------------------
-                # Проверяем дубль только этого типа.
-                #
-                # Поэтому:
-                # ID + R существует
-                # ID + G ещё нет
-                #
-                # G всё равно будет создан.
-                # ---------------------------------------------------
-
-                has_prediction = False
-
-                for entry in predictions:
-
-                    if (
-                        str(
-                            entry.get(
-                                "target_game_id"
-                            )
-                        ) == str(game_id)
-
-                        and str(
-                            entry.get(
-                                "prediction_type",
-                                ""
-                            )
-                        ).upper() == forecast_type
-
-                        and entry.get(
-                            "status"
-                        ) == "pending"
-                    ):
-
-                        has_prediction = True
-                        break
-
-                if has_prediction:
-
-                    print(
-                        f"⏭️ ID={game_id} "
-                        f"#{forecast_type} "
-                        f"уже существует",
-                        flush=True
-                    )
-
-                    continue
-
-                # ---------------------------------------------------
-                # Для первого типа cooldown работает как обычно.
-                # Для остальных типов ТОЙ ЖЕ ИГРЫ cooldown не мешает.
-                # ---------------------------------------------------
-
-                prediction = create_hybrid_prediction(
-                    game_id,
-                    game_number,
-                    forecast_type,
-                    skip_cooldown=(
-                        index > 0
-                    )
-                )
-
-                if not prediction:
-                    continue
-
-                message = make_prediction_message(
-                    prediction
-                )
-
-                prediction[
-                    "original_text"
-                ] = message
-
-                message_id = telegram_send(
-                    message
-                )
-
-                if message_id:
-
-                    prediction[
-                        "message_id"
-                    ] = message_id
-
-                    atomic_save_json(
-                        PREDICTIONS_FILE,
-                        predictions
-                    )
-
-                    print(
-                        f"📤 ОТПРАВЛЕНО: "
-                        f"#{forecast_type} | "
-                        f"{prediction['predicted_card']} "
-                        f"на #N{game_number} "
-                        f"| ID={game_id}",
-                        flush=True
-                    )
-
-    except Exception as e:
-
-        print(
-            f"⚠️ Updates error: {e}",
-            flush=True
-        )
-
-    return offset
-
-
-# =====================================================================
-# CHECK PREDICTIONS
-# =====================================================================
-
-def check_predictions():
-    global predictions
-
-    if not predictions:
-
-        print(
-            "📭 Нет прогнозов для проверки",
-            flush=True
-        )
-
-        return
-
-    if not CHANNEL_STATS:
-
-        print(
-            "❌ CHANNEL_STATS не задан",
-            flush=True
-        )
-
-        return
-
-    print(
-        f"🔍 Проверяем "
-        f"{len(predictions)} прогнозов, "
-        f"кэш: {len(games_cache)} номеров",
-        flush=True
-    )
-
-    changed = False
-
-    for entry in predictions:
-
-        if entry.get("status") != "pending":
-            continue
-
-        target = entry.get(
-            "target_number"
-        )
-
-        predicted_cards = entry.get(
-            "predicted_cards",
-            []
-        )
-
-        msg_id = entry.get(
-            "message_id"
-        )
-
-        original_text = entry.get(
-            "original_text",
-            ""
-        )
-
-        prediction_type = str(
-            entry.get(
-                "prediction_type",
-                ""
-            )
-        ).upper()
-
-        if (
-            not target
-            or not predicted_cards
-            or not msg_id
-        ):
-            continue
-
-        # Удаляем None из top-2.
-        predicted_cards = [
-            card
-            for card in predicted_cards
-            if card
+        historical_pattern = directions[
+            i - pattern_length:i
         ]
 
-        found = None
-
-        all_available = True
-
-        for dogon in range(
-            DOGON_GAMES + 1
-        ):
-
-            num = add_game_offset(
-                target,
-                dogon
-            )
-
-            bucket = games_cache.get(
-                num,
-                []
-            )
-
-            # -------------------------------------------------------
-            # Старый формат кэша на случай,
-            # если что-то осталось от предыдущего запуска.
-            # -------------------------------------------------------
-
-            if isinstance(bucket, str):
-
-                bucket = [
-                    {
-                        "game_number": num,
-                        "game_id": None,
-                        "forecast_types": [],
-                        "cards": parse_cards_from_message(
-                            bucket
-                        ).get("cards", [])
-                        if parse_cards_from_message(
-                            bucket
-                        )
-                        else [],
-                        "text": bucket
-                    }
-                ]
-
-            if not bucket:
-
-                all_available = False
-                continue
-
-            matching_records = []
-
-            for result_game in bucket:
-
-                result_tags = normalize_forecast_tags(
-                    result_game.get(
-                        "forecast_types",
-                        []
-                    )
-                )
-
-                # ---------------------------------------------------
-                # Если прогноз типизированный,
-                # результат ОБЯЗАТЕЛЬНО должен иметь этот тег.
-                #
-                # Например:
-                # прогноз #G
-                # результат должен иметь #G.
-                # ---------------------------------------------------
-
-                if prediction_type:
-
-                    if prediction_type not in result_tags:
-                        continue
-
-                matching_records.append(
-                    result_game
-                )
-
-            # -------------------------------------------------------
-            # Если игры по номеру есть, но подходящей категории нет,
-            # это не повод сразу считать проигрыш.
-            #
-            # Может существовать другая игра/сообщение с этим ID
-            # или Telegram ещё не прислал нужный тег.
-            # -------------------------------------------------------
-
-            if not matching_records:
-
-                continue
-
-            for result_game in matching_records:
-
-                actual_cards = result_game.get(
-                    "cards",
-                    []
-                )
-
-                for card in predicted_cards:
-
-                    if card in actual_cards:
-
-                        found = {
-                            "num": num,
-                            "dogon": dogon,
-                            "card": card,
-                            "game_id": result_game.get(
-                                "game_id"
-                            ),
-                            "forecast_types": result_game.get(
-                                "forecast_types",
-                                []
-                            )
-                        }
-
-                        break
-
-                if found:
-                    break
-
-            if found:
-                break
-
-        # -------------------------------------------------------------
-        # WIN
-        # -------------------------------------------------------------
-
-        if found:
-
-            entry["status"] = "win"
-
-            entry["result_game"] = found[
-                "num"
-            ]
-
-            entry["result_game_id"] = found.get(
-                "game_id"
-            )
-
-            entry["result_forecast_types"] = (
-                found.get(
-                    "forecast_types",
-                    []
-                )
-            )
-
-            entry["found_card"] = found[
-                "card"
-            ]
-
-            entry["current_dogon"] = found[
-                "dogon"
-            ]
-
-            changed = True
-
-            print(
-                f"✅ ЗАШЛО "
-                f"#{prediction_type or '?'} "
-                f"на #{found['num']} | "
-                f"догон {found['dogon']} | "
-                f"{found['card']} | "
-                f"ID={found.get('game_id')}",
-                flush=True
-            )
-
-            if msg_id and original_text:
-
-                lines = original_text.split(
-                    "\n"
-                )
-
-                lines[0] = (
-                    f"🎯 #{prediction_type or '?'} | "
-                    f"Игра: #N{target} ✅"
-                )
-
-                new_text = "\n".join(
-                    lines
-                )
-
-                telegram_edit(
-                    msg_id,
-                    new_text
-                )
-
-            atomic_save_json(
-                PREDICTIONS_FILE,
-                predictions
-            )
+        if historical_pattern != pattern:
 
             continue
 
-        # -------------------------------------------------------------
-        # ВАЖНЫЙ МОМЕНТ:
-        #
-        # Нельзя считать lose только потому,
-        # что все номера #N уже есть.
-        #
-        # Для типизированного прогноза должны быть доступны
-        # результаты именно нужного типа.
-        # -------------------------------------------------------------
+        next_direction = directions[i]
 
-        if prediction_type:
-
-            typed_games_count = 0
-
-            for dogon in range(
-                DOGON_GAMES + 1
-            ):
-
-                num = add_game_offset(
-                    target,
-                    dogon
-                )
-
-                bucket = games_cache.get(
-                    num,
-                    []
-                )
-
-                for result_game in bucket:
-
-                    result_tags = normalize_forecast_tags(
-                        result_game.get(
-                            "forecast_types",
-                            []
-                        )
-                    )
-
-                    if prediction_type in result_tags:
-                        typed_games_count += 1
-                        break
-
-            if typed_games_count < DOGON_GAMES + 1:
-
-                print(
-                    f"⏳ Ожидание "
-                    f"#{prediction_type} "
-                    f"для #{target}: "
-                    f"есть не все игры "
-                    f"нужного типа",
-                    flush=True
-                )
-
-                continue
-
-        else:
-
-            # -------------------------------------------------------
-            # Совместимость со старыми прогнозами без типа.
-            # -------------------------------------------------------
-
-            if not all_available:
-
-                print(
-                    f"⏳ Ожидание #{target} "
-                    f"(не все догоны в кэше)",
-                    flush=True
-                )
-
-                continue
-
-        # -------------------------------------------------------------
-        # LOSE
-        # -------------------------------------------------------------
-
-        entry["status"] = "lose"
-
-        changed = True
-
-        print(
-            f"❌ НЕ ЗАШЛО "
-            f"#{prediction_type or '?'}: "
-            f"догоны 0-{DOGON_GAMES} "
-            f"для #{target}",
-            flush=True
-        )
-
-        if msg_id and original_text:
-
-            lines = original_text.split(
-                "\n"
-            )
-
-            lines[0] = (
-                f"🎯 #{prediction_type or '?'} | "
-                f"Игра: #N{target} ❌"
-            )
-
-            new_text = "\n".join(
-                lines
-            )
-
-            telegram_edit(
-                msg_id,
-                new_text
-            )
-
-        atomic_save_json(
-            PREDICTIONS_FILE,
-            predictions
-        )
-
-    if changed:
-
-        print(
-            "💾 Прогнозы обновлены",
-            flush=True
-        )
-
-
-# =====================================================================
-# CREATE PREDICTION
-# =====================================================================
-
-def create_hybrid_prediction(
-    game_id,
-    game_number,
-    forecast_type,
-    skip_cooldown=False
-):
-    global last_prediction_time
-
-    game_id = str(game_id)
-
-    forecast_type = str(
-        forecast_type
-    ).upper().lstrip("#")
-
-    if forecast_type not in FORECAST_TYPES:
-
-        print(
-            f"🚫 Неизвестный тип "
-            f"прогноза: {forecast_type}",
-            flush=True
-        )
-
-        return None
-
-    # ---------------------------------------------------------------
-    # ПРОВЕРКА ДУБЛЯ ПО:
-    #
-    # ID + ТИП
-    #
-    # Поэтому:
-    #
-    # ID=123 + R
-    # ID=123 + G
-    #
-    # могут существовать одновременно.
-    # ---------------------------------------------------------------
-
-    for entry in predictions:
-
-        if (
-            str(
-                entry.get(
-                    "target_game_id"
-                )
-            ) == game_id
-
-            and str(
-                entry.get(
-                    "prediction_type",
-                    ""
-                )
-            ).upper() == forecast_type
-
-            and entry.get(
-                "status"
-            ) == "pending"
+        if next_direction not in (
+            "UP",
+            "DOWN",
         ):
 
-            print(
-                f"⏭️ Прогноз "
-                f"#{forecast_type} на "
-                f"ID={game_id} уже существует",
-                flush=True
-            )
+            continue
 
-            return None
-
-    # ---------------------------------------------------------------
-    # COOLDOWN
-    #
-    # Для нескольких типов одной игры:
-    # R -> G -> O
-    #
-    # cooldown не блокирует G/O.
-    # ---------------------------------------------------------------
-
-    now_ts = time.time()
-
-    if not skip_cooldown:
-
-        if (
-            now_ts - last_prediction_time
-            < PREDICTION_COOLDOWN_SECONDS
-        ):
-
-            print(
-                f"⏭️ Cooldown "
-                f"{PREDICTION_COOLDOWN_SECONDS} сек",
-                flush=True
-            )
-
-            return None
-
-    # ---------------------------------------------------------------
-    # ВРЕМЯ ПРОГНОЗА
-    # ---------------------------------------------------------------
-
-    now = datetime.now(
-        MOSCOW_TZ
-    )
-
-    timestamp_msk = (
-        now.strftime(
-            "%H:%M:%S.%f"
-        )[:-3]
-    )
-
-    print(
-        "\n══════════════════════════════════",
-        flush=True
-    )
-
-    print(
-        f"🧠 HYBRID АНАЛИЗ | "
-        f"ТИП=#{forecast_type} | "
-        f"ID={game_id} | "
-        f"#N{game_number}",
-        flush=True
-    )
-
-    print(
-        f"⏱ Timestamp={timestamp_msk}",
-        flush=True
-    )
-
-    # ---------------------------------------------------------------
-    # HYBRID
-    #
-    # ВАЖНО:
-    # здесь передаём forecast_type.
-    #
-    # Поэтому #G не видит историю #R/#O.
-    # ---------------------------------------------------------------
-
-    result = build_hybrid_prediction(
-        game_id,
-        timestamp_msk,
-        forecast_type
-    )
-
-    if not result:
-
-        print(
-            f"⏭️ [{forecast_type}] "
-            f"Гибрид не дал результата",
-            flush=True
+        matches.append(
+            {
+                "index": i,
+                "next": next_direction,
+            }
         )
 
-        return None
-
-    print(
-        f"🥇 [{forecast_type}] "
-        f"{result['card']} "
-        f"{result['probability']:.1%}",
-        flush=True
-    )
-
-    print(
-        f"🥈 {result['second_card']} "
-        f"{result['second_probability']:.1%}",
-        flush=True
-    )
-
-    print(
-        f"📏 Gap: "
-        f"{result['gap']:.1%}",
-        flush=True
-    )
-
-    print(
-        f"🤝 Поддержка: "
-        f"{result['supporters']}",
-        flush=True
-    )
-
-    # ---------------------------------------------------------------
-    # FILTER
-    # ---------------------------------------------------------------
-
-    if not prediction_passes_filter(
-        result
-    ):
-
-        print(
-            f"🚫 [{forecast_type}] "
-            f"ПРОГНОЗ ОТМЕНЁН ФИЛЬТРОМ",
-            flush=True
-        )
-
-        return None
-
-    # ---------------------------------------------------------------
-    # SAVE PREDICTION
-    # ---------------------------------------------------------------
-
-    entry = {
-        "target_game_id": game_id,
-
-        "target_number": game_number,
-
-        # -----------------------------------------------------------
-        # НОВОЕ:
-        # конкретный тип прогноза.
-        # -----------------------------------------------------------
-
-        "prediction_type": forecast_type,
-
-        "timestamp_msk": timestamp_msk,
-
-        "hybrid": result,
-
-        "predicted_card": result[
-            "card"
-        ],
-
-        "predicted_cards": [
-            result["card"],
-            result.get("second_card")
-        ],
-
-        "status": "pending",
-
-        "current_dogon": 0,
-
-        "created_at": (
-            datetime.now(
-                MOSCOW_TZ
-            ).isoformat()
-        ),
-
-        "message_id": None,
-
-        "original_text": "",
-
-        "result_game": None,
-
-        "result_game_id": None,
-
-        "result_forecast_types": [],
-
-        "found_card": None
-    }
-
-    predictions.append(
-        entry
-    )
-
-    atomic_save_json(
-        PREDICTIONS_FILE,
-        predictions
-    )
-
-    last_prediction_time = now_ts
-
-    print(
-        f"🔮 ПРОГНОЗ СОЗДАН: "
-        f"#{forecast_type} | "
-        f"{result['card']} "
-        f"для #N{game_number} "
-        f"| ID={game_id}",
-        flush=True
-    )
-
-    return entry
+    return matches
 
 
 # =====================================================================
-# API GET ACTIVE GAMES — HISTORY
+# ANALYZE PATTERN
 # =====================================================================
 
-def get_active_games():
+def analyze_pattern(candles):
 
-    url = (
-        f"{BASE_URL}/service-api/"
-        "main-live-feed/v3/games1x2"
-        "?cfView=3"
-        "&count=40"
-        "&fcountry=190"
-        "&gr=415"
-        "&grMode=4"
-        "&lng=ru"
-        "&ref=7"
-        "&selectedMs=10.146.1643503"
-    )
+    if len(candles) < MIN_CANDLES_FOR_ANALYSIS:
 
-    try:
-
-        response = SESSION.get(
-            url,
-            timeout=10
-        )
-
-        if response.status_code != 200:
-            return []
-
-        data = response.json()
-
-        if isinstance(data, list):
-
-            games = data
-
-        elif isinstance(data, dict):
-
-            games = data.get(
-                "Value",
-                []
-            )
-
-        else:
-
-            games = []
-
-        result = []
-
-        for game in games:
-
-            if not isinstance(
-                game,
-                dict
-            ):
-                continue
-
-            liga = game.get(
-                "liga",
-                {}
-            )
-
-            if str(
-                liga.get("id", "")
-            ) != str(LEAGUE_ID):
-                continue
-
-            if not game.get("id"):
-                continue
-
-            result.append(game)
-
-        return result
-
-    except Exception as e:
-
-        print(
-            f"❌ API games: {e}",
-            flush=True
-        )
-
-        return []
-
-
-# =====================================================================
-# PROCESS GAME — HISTORY ONLY
-# =====================================================================
-
-def inspect_game_state(
-    gid,
-    active_game=None,
-    final_attempt=False
-):
-
-    raw = get_game_data(
-        gid
-    )
-
-    if not raw:
         return None
 
-    player, dealer, state = (
-        extract_game_sc(raw)
+    directions = build_directions(
+        candles
     )
 
-    if state is None:
+    current_pattern = directions[
+        -PATTERN_LENGTH:
+    ]
+
+    if len(current_pattern) < PATTERN_LENGTH:
+
         return None
 
-    info = tracked_games.setdefault(
-        str(gid),
-        {
-            "game_id": str(gid),
+    if None in current_pattern:
 
-            "first_seen": (
-                datetime.now(
-                    MOSCOW_TZ
-                ).isoformat()
-            ),
+        return None
 
-            "last_state": None,
+    if "FLAT" in current_pattern:
 
-            "player": [],
+        return None
 
-            "dealer": [],
+    matches = find_pattern_matches(
+        directions,
+        current_pattern
+    )
 
-            "game_number": None,
+    up_count = sum(
+        1
+        for match in matches
+        if match["next"] == "UP"
+    )
 
-            "final_attempts": 0,
+    down_count = sum(
+        1
+        for match in matches
+        if match["next"] == "DOWN"
+    )
+
+    total = (
+        up_count
+        + down_count
+    )
+
+    if total < MIN_MATCHES:
+
+        return {
+            "pattern": current_pattern,
+            "matches": total,
+            "up": up_count,
+            "down": down_count,
+            "up_probability": 0.0,
+            "down_probability": 0.0,
+            "prediction": None,
+            "confidence": 0.0,
         }
+
+    up_probability = (
+        up_count
+        / total
+        * 100
     )
 
-    if active_game:
-
-        game_number = active_game.get(
-            "gameNumber",
-            active_game.get(
-                "number"
-            )
-        )
-
-        if game_number is not None:
-            info["game_number"] = (
-                game_number
-            )
-
-    info["last_state"] = str(
-        state
+    down_probability = (
+        down_count
+        / total
+        * 100
     )
 
-    info["player"] = player
-    info["dealer"] = dealer
+    prediction = None
+    confidence = 0.0
 
-    info["last_seen"] = (
-        datetime.now(
-            MOSCOW_TZ
-        ).isoformat()
-    )
+    if up_probability > down_probability:
 
-    print(
-        f"🎮 ID={gid} | "
-        f"STATE={state} | "
-        f"P1={len(player)} | "
-        f"P2={len(dealer)}"
-        + (
-            " | финальная проверка"
-            if final_attempt
-            else ""
-        ),
-        flush=True
-    )
+        prediction = "UP"
+        confidence = up_probability
 
-    return raw, state
+    elif down_probability > up_probability:
 
+        prediction = "DOWN"
+        confidence = down_probability
 
-# =====================================================================
-# BUILD GAME FROM CACHE
-# =====================================================================
+    if confidence < MIN_CONFIDENCE:
 
-def build_game_from_cached_cards(
-    gid,
-    info
-):
-
-    player = (
-        info.get("player", [])
-        or []
-    )
-
-    dealer = (
-        info.get("dealer", [])
-        or []
-    )
-
-    if not player and not dealer:
-        return None
-
-    now = datetime.now(
-        MOSCOW_TZ
-    )
-
-    all_cards = []
-    sequence = []
-    pos = 1
-
-    for i in range(
-        max(
-            len(player),
-            len(dealer)
-        )
-    ):
-
-        if i < len(player):
-
-            card = player[i]
-
-            all_cards.append(card)
-
-            sequence.append({
-                "position": pos,
-                "who": "P",
-                "rank": card["rank"],
-                "suit": card["suit"]
-            })
-
-            pos += 1
-
-        if i < len(dealer):
-
-            card = dealer[i]
-
-            all_cards.append(card)
-
-            sequence.append({
-                "position": pos,
-                "who": "D",
-                "rank": card["rank"],
-                "suit": card["suit"]
-            })
-
-            pos += 1
-
-    game_number = info.get(
-        "game_number"
-    )
-
-    try:
-
-        game_number = (
-            int(game_number)
-            if game_number is not None
-            else get_game_number()
-        )
-
-    except (
-        TypeError,
-        ValueError
-    ):
-
-        game_number = get_game_number()
-
-    gid = str(gid)
-
-    tags = get_tags_for_game(
-        gid
-    )
+        prediction = None
 
     return {
-        "game_id": gid,
-
-        "timestamp": now.isoformat(),
-
-        "timestamp_msk": (
-            now.strftime(
-                "%H:%M:%S.%f"
-            )[:-3]
-        ),
-
-        "state": str(
-            info.get(
-                "last_state",
-                "4"
-            )
-        ),
-
-        "game_number": game_number,
-
-        "player_cards": player,
-
-        "dealer_cards": dealer,
-
-        "player_suits": [
-            c["suit"]
-            for c in player
-        ],
-
-        "player_ranks": [
-            c["rank"]
-            for c in player
-        ],
-
-        "dealer_suits": [
-            c["suit"]
-            for c in dealer
-        ],
-
-        "dealer_ranks": [
-            c["rank"]
-            for c in dealer
-        ],
-
-        "all_suits": [
-            c["suit"]
-            for c in all_cards
-        ],
-
-        "all_ranks": [
-            c["rank"]
-            for c in all_cards
-        ],
-
-        "sequence": sequence,
-
-        "total_cards": len(all_cards),
-
-        "first_player_card": (
-            player[0]
-            if player
-            else None
-        ),
-
-        "id_last_digit": gid[-1],
-
-        "id_last_two": (
-            gid[-2:]
-            if len(gid) >= 2
-            else ""
-        ),
-
-        "forecast_types": tags,
-
-        "tags": tags
+        "pattern": current_pattern,
+        "matches": total,
+        "up": up_count,
+        "down": down_count,
+        "up_probability": up_probability,
+        "down_probability": down_probability,
+        "prediction": prediction,
+        "confidence": confidence,
     }
 
 
 # =====================================================================
-# SAVE FINISHED GAME
+# CHECK DUPLICATE SIGNAL
 # =====================================================================
 
-def save_finished_game(
-    gid,
-    raw=None,
-    active_game=None,
-    from_cache=False
+def has_active_signal():
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM signals
+        WHERE checked = 0
+        """
+    )
+
+    count = cursor.fetchone()[0]
+
+    conn.close()
+
+    return count > 0
+
+
+# =====================================================================
+# SAVE SIGNAL
+# =====================================================================
+
+def save_signal(
+    result,
+    candle
 ):
 
-    if game_exists(gid):
+    prediction = result.get(
+        "prediction"
+    )
 
-        # -----------------------------------------------------------
-        # Даже если игра уже сохранена API,
-        # проверяем, появились ли новые Telegram-теги.
-        # -----------------------------------------------------------
+    if prediction not in (
+        "UP",
+        "DOWN",
+    ):
 
-        tags = get_tags_for_game(
-            gid
-        )
+        return False
 
-        if tags:
-            attach_tags_to_history(
-                gid,
-                tags
-            )
+    if has_active_signal():
 
-        tracked_games.pop(
-            str(gid),
-            None
+        logger.info(
+            "⏳ Уже есть активный сигнал. "
+            "Ждём проверки."
         )
 
         return False
 
-    info = tracked_games.get(
-        str(gid),
-        {}
+    signal_time = candle.get(
+        "time"
     )
 
-    if from_cache:
+    signal_timestamp = candle.get(
+        "timestamp"
+    )
 
-        parsed = build_game_from_cached_cards(
-            gid,
-            info
+    entry_price = candle.get(
+        "close"
+    )
+
+    pattern_text = ",".join(
+        result.get(
+            "pattern",
+            []
+        )
+    )
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO signals (
+            signal_time,
+            signal_timestamp,
+            entry_price,
+            prediction,
+            confidence,
+            matches,
+            up_count,
+            down_count,
+            pattern,
+            expiration_seconds,
+            checked
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (
+            signal_time,
+            signal_timestamp,
+            entry_price,
+            prediction,
+            result.get("confidence", 0.0),
+            result.get("matches", 0),
+            result.get("up", 0),
+            result.get("down", 0),
+            pattern_text,
+            EXPIRATION_SECONDS,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    return True
+
+
+# =====================================================================
+# SHOW SIGNAL
+# =====================================================================
+
+def print_signal(
+    result,
+    candle
+):
+
+    prediction = result.get(
+        "prediction"
+    )
+
+    if prediction not in (
+        "UP",
+        "DOWN",
+    ):
+
+        return
+
+    logger.info("")
+    logger.info("=" * 65)
+    logger.info("🚨 НОВЫЙ СИГНАЛ")
+    logger.info("=" * 65)
+
+    logger.info(
+        f"🕯 Время: "
+        f"{candle.get('time')}"
+    )
+
+    logger.info(
+        f"💰 Цена входа: "
+        f"{candle.get('close')}"
+    )
+
+    logger.info(
+        f"🧩 Паттерн: "
+        f"{pattern_to_text(result['pattern'])}"
+    )
+
+    logger.info(
+        f"🔎 Совпадений: "
+        f"{result['matches']}"
+    )
+
+    logger.info(
+        f"🟢 Вверх: "
+        f"{result['up']} "
+        f"({result['up_probability']:.1f}%)"
+    )
+
+    logger.info(
+        f"🔴 Вниз: "
+        f"{result['down']} "
+        f"({result['down_probability']:.1f}%)"
+    )
+
+    logger.info("-" * 65)
+
+    if prediction == "UP":
+
+        logger.info(
+            "🚀 СИГНАЛ: ВЫШЕ 🟢"
         )
 
     else:
 
-        parsed = parse_game_data(
-            gid,
-            raw
+        logger.info(
+            "📉 СИГНАЛ: НИЖЕ 🔴"
         )
 
-    if not parsed:
-        return False
-
-    if active_game:
-
-        game_number = active_game.get(
-            "gameNumber",
-            active_game.get(
-                "number"
-            )
-        )
-
-        try:
-
-            parsed["game_number"] = (
-                int(game_number)
-                if game_number is not None
-                else parsed.get(
-                    "game_number",
-                    get_game_number()
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
-            pass
-
-    # ---------------------------------------------------------------
-    # На момент сохранения ещё раз смотрим Telegram ID -> tags.
-    # ---------------------------------------------------------------
-
-    tags = get_tags_for_game(
-        gid
+    logger.info(
+        f"🎯 Вероятность: "
+        f"{result['confidence']:.1f}%"
     )
 
-    parsed["forecast_types"] = tags
-    parsed["tags"] = tags
-
-    ok = add_or_update_game(
-        parsed
+    logger.info(
+        f"⏱ Экспирация: "
+        f"{EXPIRATION_SECONDS} секунд"
     )
 
-    if ok:
-
-        tracked_games.pop(
-            str(gid),
-            None
-        )
-
-    return ok
+    logger.info("=" * 65)
 
 
 # =====================================================================
-# PROCESS GAME
+# CHECK SIGNALS
 # =====================================================================
 
-def process_game(active_game):
+def check_pending_signals(candles):
 
-    gid = str(
-        active_game.get(
-            "id",
-            ""
-        )
-    )
+    if not candles:
 
-    if not gid or game_exists(gid):
         return
 
-    result = inspect_game_state(
-        gid,
-        active_game=active_game
+    latest_candle = candles[-1]
+
+    latest_timestamp = latest_candle.get(
+        "timestamp"
     )
 
-    if not result:
+    if latest_timestamp is None:
+
         return
 
-    raw, state = result
+    conn = sqlite3.connect(
+        DB_FILE
+    )
 
-    if str(state) == "5":
+    cursor = conn.cursor()
 
-        print(
-            f"🏁 ID={gid} "
-            f"завершена (STATE=5)",
-            flush=True
+    cursor.execute(
+        """
+        SELECT
+            id,
+            signal_time,
+            signal_timestamp,
+            entry_price,
+            prediction,
+            confidence,
+            expiration_seconds
+        FROM signals
+        WHERE checked = 0
+        ORDER BY id ASC
+        """
+    )
+
+    signals = cursor.fetchall()
+
+    if not signals:
+
+        conn.close()
+        return
+
+    for signal in signals:
+
+        signal_id = signal[0]
+        signal_time = signal[1]
+        signal_timestamp = signal[2]
+        entry_price = signal[3]
+        prediction = signal[4]
+        confidence = signal[5]
+        expiration_seconds = signal[6]
+
+        expiration_timestamp = (
+            signal_timestamp
+            + expiration_seconds
         )
 
-        save_finished_game(
-            gid,
-            raw,
-            active_game
-        )
-
-    elif str(state) == "4":
-
-        print(
-            f"📌 ID={gid} "
-            f"STATE=4 — финальные P1/P2 "
-            f"зафиксированы, ждём исчезновения",
-            flush=True
-        )
-
-
-# =====================================================================
-# FINALIZE DISAPPEARED GAMES
-# =====================================================================
-
-def finalize_disappeared_games(active_ids):
-
-    for gid in list(tracked_games.keys()):
-
-        if (
-            gid in active_ids
-            or game_exists(gid)
-        ):
-            continue
-
-        info = tracked_games.get(
-            gid,
-            {}
-        )
-
-        last_state = str(
-            info.get(
-                "last_state",
-                ""
-            )
-        )
-
-        player = (
-            info.get(
-                "player",
-                []
-            )
-            or []
-        )
-
-        dealer = (
-            info.get(
-                "dealer",
-                []
-            )
-            or []
-        )
-
-        # =========================================================
-        # STATE=3 / STATE=4
-        # Игра исчезла, но финальные карты уже есть в кэше
-        # =========================================================
-
-        if last_state in {"3", "4"}:
-
-            print(
-                f"🏁 ID={gid} исчезла "
-                f"после STATE={last_state} — "
-                f"сохраняем последний кэш "
-                f"P1={len(player)} "
-                f"| P2={len(dealer)}",
-                flush=True
-            )
-
-            if save_finished_game(
-                gid,
-                from_cache=True
-            ):
-
-                print(
-                    f"✅ ID={gid} сохранена "
-                    f"из кэша STATE={last_state}",
-                    flush=True
-                )
-
-            else:
-
-                print(
-                    f"⚠️ ID={gid} "
-                    f"не удалось сохранить "
-                    f"из кэша STATE={last_state}",
-                    flush=True
-                )
+        if latest_timestamp < expiration_timestamp:
 
             continue
 
-        # =========================================================
-        # ЕСЛИ ФИНАЛЬНЫЙ STATE НЕ УСПЕЛ ЗАФИКСИРОВАТЬСЯ
-        # ДЕЛАЕМ ДОПОЛНИТЕЛЬНЫЕ ЗАПРОСЫ
-        # =========================================================
-
-        attempts = int(
-            info.get(
-                "final_attempts",
-                0
-            )
+        cursor.execute(
+            """
+            SELECT
+                time,
+                close
+            FROM candles
+            WHERE asset_id = ?
+            AND timestamp >= ?
+            ORDER BY timestamp ASC
+            LIMIT 1
+            """,
+            (
+                ASSET_ID,
+                expiration_timestamp,
+            ),
         )
 
-        if attempts >= 3:
+        exit_row = cursor.fetchone()
 
-            print(
-                f"⚠️ ID={gid} исчезла "
-                f"с последним STATE={last_state}; "
-                f"финального STATE=3/4/5 нет",
-                flush=True
-            )
-
-            tracked_games.pop(
-                gid,
-                None
-            )
+        if not exit_row:
 
             continue
 
-        info["final_attempts"] = (
-            attempts + 1
+        exit_time = exit_row[0]
+        exit_price = exit_row[1]
+
+        result = "LOSE"
+
+        if prediction == "UP":
+
+            if exit_price > entry_price:
+                result = "WIN"
+
+        elif prediction == "DOWN":
+
+            if exit_price < entry_price:
+                result = "WIN"
+
+        cursor.execute(
+            """
+            UPDATE signals
+            SET
+                checked = 1,
+                result = ?,
+                exit_price = ?,
+                checked_time = ?
+            WHERE id = ?
+            """,
+            (
+                result,
+                exit_price,
+                exit_time,
+                signal_id,
+            ),
         )
 
-        print(
-            f"🔄 Финальная попытка "
-            f"{info['final_attempts']}/3 "
-            f"для ID={gid} "
-            f"| последний STATE={last_state or 'нет'}",
-            flush=True
+        conn.commit()
+
+        logger.info("")
+        logger.info("=" * 65)
+        logger.info("🔍 ПРОВЕРКА СИГНАЛА")
+        logger.info("=" * 65)
+
+        logger.info(
+            f"🕯 Сигнал был: "
+            f"{signal_time}"
         )
 
-        result = inspect_game_state(
-            gid,
-            final_attempt=True
+        logger.info(
+            f"💰 Вход: "
+            f"{entry_price}"
         )
 
-        if not result:
-            continue
+        logger.info(
+            f"💰 Цена через "
+            f"{expiration_seconds} сек: "
+            f"{exit_price}"
+        )
 
-        raw, state = result
+        logger.info(
+            f"🎯 Прогноз: "
+            f"{prediction}"
+        )
 
-        # =========================================================
-        # STATE=5 — полноценное сохранение из API
-        # =========================================================
+        logger.info(
+            f"📊 Уверенность: "
+            f"{confidence:.1f}%"
+        )
 
-        if str(state) == "5":
+        if result == "WIN":
 
-            print(
-                f"🏁 ID={gid} найдена "
-                f"завершённой после исчезновения "
-                f"(STATE=5)",
-                flush=True
+            logger.info("")
+            logger.info(
+                "✅ ЗАШЛО!"
             )
-
-            save_finished_game(
-                gid,
-                raw
-            )
-
-            continue
-
-        # =========================================================
-        # STATE=3 / STATE=4
-        # Запоминаем карты в кэш.
-        # При следующем проходе, если игра исчезнет,
-        # она сохранится из кэша.
-        # =========================================================
-
-        elif str(state) in {"3", "4"}:
-
-            info["last_state"] = str(
-                state
-            )
-
-            player, dealer, _ = extract_game_sc(
-                raw
-            )
-
-            if player:
-                info["player"] = player
-
-            if dealer:
-                info["dealer"] = dealer
-
-            tracked_games[gid] = info
-
-            print(
-                f"📌 ID={gid} финально "
-                f"зафиксирована STATE={state} "
-                f"| P1={len(info.get('player', []))} "
-                f"| P2={len(info.get('dealer', []))}",
-                flush=True
-            )
-
-            continue
-
-        # =========================================================
-        # STATE НЕ ФИНАЛЬНЫЙ
-        # =========================================================
 
         else:
 
-            print(
-                f"⏳ ID={gid} после исчезновения "
-                f"вернула STATE={state}, "
-                f"ждём следующую проверку",
-                flush=True
+            logger.info("")
+            logger.info(
+                "❌ НЕ ЗАШЛО!"
             )
 
-        tracked_games.pop(gid, None)
+        logger.info("=" * 65)
 
-        continue
-
-        info["final_attempts"] = (
-            attempts + 1
-        )
-
-        result = inspect_game_state(
-            gid,
-            final_attempt=True
-        )
-
-        if not result:
-            continue
-
-        raw, state = result
-
-        if str(state) == "5":
-
-            print(
-                f"🏁 ID={gid} найдена "
-                f"завершённой после исчезновения "
-                f"(STATE=5)",
-                flush=True
-            )
-
-            save_finished_game(
-                gid,
-                raw
-            )
-
-        elif str(state) == "4":
-
-            info["last_state"] = "4"
+    conn.close()
 
 
 # =====================================================================
-# CLEANUP
+# SIGNAL STATISTICS
 # =====================================================================
 
-def cleanup_predictions():
-    global predictions
+def print_statistics():
 
-    if len(predictions) > 1000:
-
-        predictions = predictions[-1000:]
-
-        atomic_save_json(
-            PREDICTIONS_FILE,
-            predictions
-        )
-
-
-def cleanup_games_cache():
-    """
-    Удаляем слишком старые номера из Telegram-кэша,
-    чтобы память не росла бесконечно.
-    """
-
-    if len(games_cache) <= 300:
-        return
-
-    numbers = sorted(
-        games_cache.keys()
+    conn = sqlite3.connect(
+        DB_FILE
     )
 
-    for num in numbers[:-200]:
-        games_cache.pop(
-            num,
-            None
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            COUNT(*),
+            SUM(
+                CASE
+                    WHEN result = 'WIN'
+                    THEN 1
+                    ELSE 0
+                END
+            ),
+            SUM(
+                CASE
+                    WHEN result = 'LOSE'
+                    THEN 1
+                    ELSE 0
+                END
+            )
+        FROM signals
+        WHERE checked = 1
+        """
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    total = row[0] or 0
+    wins = row[1] or 0
+    losses = row[2] or 0
+
+    accuracy = 0.0
+
+    if total > 0:
+
+        accuracy = (
+            wins
+            / total
+            * 100
         )
+
+    logger.info("")
+    logger.info("📊 СТАТИСТИКА СИГНАЛОВ")
+
+    logger.info(
+        f"🎯 Всего: {total}"
+    )
+
+    logger.info(
+        f"✅ Зашло: {wins}"
+    )
+
+    logger.info(
+        f"❌ Не зашло: {losses}"
+    )
+
+    logger.info(
+        f"📈 Точность: "
+        f"{accuracy:.2f}%"
+    )
+
+
+# =====================================================================
+# CURRENT ANALYSIS
+# =====================================================================
+
+def print_current_analysis(
+    result,
+    candles
+):
+
+    if not result:
+
+        return
+
+    logger.info("")
+    logger.info("-" * 65)
+
+    logger.info(
+        f"🧩 Текущий паттерн: "
+        f"{pattern_to_text(result['pattern'])}"
+    )
+
+    logger.info(
+        f"🔎 Найдено совпадений: "
+        f"{result['matches']}"
+    )
+
+    if result["matches"] > 0:
+
+        logger.info(
+            f"🟢 Вверх: "
+            f"{result['up']} "
+            f"({result['up_probability']:.1f}%)"
+        )
+
+        logger.info(
+            f"🔴 Вниз: "
+            f"{result['down']} "
+            f"({result['down_probability']:.1f}%)"
+        )
+
+    if result.get("prediction"):
+
+        logger.info(
+            f"🎯 Возможный сигнал: "
+            f"{result['prediction']}"
+        )
+
+    else:
+
+        logger.info(
+            "⏭️ Сигнал пока не подходит"
+        )
+
+    logger.info("-" * 65)
 
 
 # =====================================================================
@@ -4235,199 +1509,228 @@ def cleanup_games_cache():
 # =====================================================================
 
 def main():
-    global history
-    global predictions
 
-    print(
-        "\n=================================================="
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("🤖 BINARIUM AUTO ANALYZER")
+    logger.info("=" * 70)
+
+    logger.info("Режим:")
+
+    logger.info(
+        f"🕯 Интервал свечи: "
+        f"{DETAILIZATION}"
     )
 
-    print(
-        "🚀 БОТ — ПРОГНОЗЫ ПО ID + "
-        "РАЗДЕЛЕНИЕ #R/#G/#O/#X"
+    logger.info(
+        f"🧩 Размер паттерна: "
+        f"{PATTERN_LENGTH} свечей"
     )
 
-    print(
-        "=================================================="
+    logger.info(
+        f"⏱ Экспирация: "
+        f"{EXPIRATION_SECONDS} секунд"
     )
 
-    history = load_history()
-
-    predictions = load_predictions()
-
-    print(
-        f"📚 История: {len(history)} игр"
+    logger.info(
+        f"🎯 Минимум совпадений: "
+        f"{MIN_MATCHES}"
     )
 
-    print(
-        f"📊 Прогнозов: {len(predictions)}"
+    logger.info(
+        f"📊 Минимальная уверенность: "
+        f"{MIN_CONFIDENCE}%"
     )
 
-    print(
-        "🏷️ Типы: #R | #G | #O | #X"
+    # -------------------------------------------------------------
+    # DATABASE
+    # -------------------------------------------------------------
+
+    init_database()
+
+    # -------------------------------------------------------------
+    # HISTORY
+    # -------------------------------------------------------------
+
+    download_history()
+
+    # -------------------------------------------------------------
+    # STATS
+    # -------------------------------------------------------------
+
+    count, first_time, last_time = (
+        get_database_stats()
     )
 
-    print(
-        "📡 Теги: Telegram | "
-        "карты/STATE: API"
+    logger.info("")
+    logger.info(
+        f"📚 Свечей в базе: {count}"
     )
 
-    print(
-        f"📡 Окно базы: "
-        f"{HISTORY_HOURS} часов"
+    logger.info(
+        f"🕐 Первая: {first_time}"
     )
 
-    print(
-        "==================================================\n"
+    logger.info(
+        f"🕐 Последняя: {last_time}"
     )
 
-    offset = get_offset()
+    cycle = 0
 
-    print(
-        f"📌 Telegram offset: {offset}"
-    )
+    # -------------------------------------------------------------
+    # MAIN LOOP
+    # -------------------------------------------------------------
 
     while True:
 
-        start = time.time()
+        cycle += 1
 
         try:
 
-            # =========================================================
-            # API — СБОР ИСТОРИИ
-            # =========================================================
+            now = utc_now()
 
-            games = get_active_games()
+            logger.info("")
+            logger.info("=" * 70)
 
-            if games:
-
-                print(
-                    f"📡 API: {len(games)} игр"
-                )
-
-            active_ids = set()
-
-            for game in games:
-
-                try:
-
-                    gid = str(
-                        game.get(
-                            "id",
-                            ""
-                        )
-                    )
-
-                    if gid:
-                        active_ids.add(gid)
-
-                    process_game(game)
-
-                except Exception as e:
-
-                    print(
-                        f"❌ Ошибка API: {e}",
-                        flush=True
-                    )
-
-            finalize_disappeared_games(
-                active_ids
+            logger.info(
+                f"🔄 ЦИКЛ #{cycle} | "
+                f"{format_api_time(now)}"
             )
 
-            # =========================================================
-            # CLEAN TRACKER
-            # =========================================================
+            # -----------------------------------------------------
+            # UPDATE
+            # -----------------------------------------------------
 
-            cutoff_tracker = (
-                datetime.now(
-                    MOSCOW_TZ
-                )
-                - timedelta(
-                    minutes=15
-                )
+            saved = update_recent_candles()
+
+            count, _, last_time = (
+                get_database_stats()
             )
 
-            for gid in list(
-                tracked_games.keys()
+            logger.info(
+                f"💾 Сохранено/обновлено: "
+                f"{saved}"
+            )
+
+            logger.info(
+                f"📚 Всего свечей: "
+                f"{count}"
+            )
+
+            logger.info(
+                f"🕯 Последняя свеча: "
+                f"{last_time}"
+            )
+
+            # -----------------------------------------------------
+            # LOAD
+            # -----------------------------------------------------
+
+            candles = load_candles_from_database()
+
+            # -----------------------------------------------------
+            # CHECK OLD SIGNALS
+            # -----------------------------------------------------
+
+            check_pending_signals(
+                candles
+            )
+
+            # -----------------------------------------------------
+            # WAIT FOR DATA
+            # -----------------------------------------------------
+
+            if len(candles) < MIN_CANDLES_FOR_ANALYSIS:
+
+                remaining = (
+                    MIN_CANDLES_FOR_ANALYSIS
+                    - len(candles)
+                )
+
+                logger.info(
+                    f"⏳ Накопление данных..."
+                )
+
+                logger.info(
+                    f"Ещё нужно минимум "
+                    f"{remaining} свечей"
+                )
+
+                time.sleep(
+                    UPDATE_INTERVAL
+                )
+
+                continue
+
+            # -----------------------------------------------------
+            # ANALYZE
+            # -----------------------------------------------------
+
+            result = analyze_pattern(
+                candles
+            )
+
+            print_current_analysis(
+                result,
+                candles
+            )
+
+            # -----------------------------------------------------
+            # NEW SIGNAL
+            # -----------------------------------------------------
+
+            if (
+                result
+                and result.get("prediction")
             ):
 
-                try:
+                if not has_active_signal():
 
-                    seen = datetime.fromisoformat(
-                        tracked_games[gid].get(
-                            "last_seen",
-                            tracked_games[gid][
-                                "first_seen"
-                            ]
-                        )
+                    latest_candle = candles[-1]
+
+                    saved_signal = save_signal(
+                        result,
+                        latest_candle
                     )
 
-                    if seen.tzinfo is None:
-                        seen = MOSCOW_TZ.localize(
-                            seen
+                    if saved_signal:
+
+                        print_signal(
+                            result,
+                            latest_candle
                         )
 
-                    if seen < cutoff_tracker:
+            # -----------------------------------------------------
+            # STATS
+            # -----------------------------------------------------
 
-                        tracked_games.pop(
-                            gid,
-                            None
-                        )
+            if cycle % 12 == 0:
 
-                except Exception:
-                    pass
+                print_statistics()
 
-            # =========================================================
-            # TELEGRAM — ID + ТЕГИ + ОЖИДАНИЕ
-            # =========================================================
-
-            offset = process_telegram_updates(
-                offset
-            )
-
-            # =========================================================
-            # ПРОВЕРКА ПРОГНОЗОВ
-            # =========================================================
-
-            check_predictions()
-
-            # =========================================================
-            # CLEANUP
-            # =========================================================
-
-            cleanup_predictions()
-
-            cleanup_games_cache()
-
-            cleanup_history_by_time()
-
-            elapsed = (
-                time.time()
-                - start
-            )
+            # -----------------------------------------------------
+            # WAIT
+            # -----------------------------------------------------
 
             time.sleep(
-                max(
-                    0.1,
-                    POLL_INTERVAL - elapsed
-                )
+                UPDATE_INTERVAL
             )
 
         except KeyboardInterrupt:
 
-            print(
-                "\n🛑 Бот остановлен"
+            logger.info(
+                "🛑 Остановка по Ctrl+C"
             )
 
             break
 
-        except Exception as e:
+        except Exception:
 
-            print(
-                f"❌ Критическая ошибка: {e}"
+            logger.exception(
+                "❌ Ошибка главного цикла"
             )
 
-            time.sleep(3)
+            time.sleep(5)
 
 
 # =====================================================================
@@ -4435,4 +1738,23 @@ def main():
 # =====================================================================
 
 if __name__ == "__main__":
-    main()
+
+    try:
+
+        main()
+
+    except KeyboardInterrupt:
+
+        print()
+        print(
+            "🛑 Бот остановлен."
+        )
+
+    except Exception:
+
+        print()
+        print("❌ КРИТИЧЕСКАЯ ОШИБКА:")
+
+        traceback.print_exc()
+
+        sys.exit(1)
