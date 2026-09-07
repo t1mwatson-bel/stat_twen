@@ -2195,51 +2195,51 @@ def print_current_analysis(result):
 
     logger.info(
         f"🧩 Паттерн: "
-        f"{pattern_to_text(result['pattern'])}"
+        f"{pattern_to_text(result.get('pattern', []))}"
     )
 
     logger.info(
         f"🔎 Всего совпадений: "
-        f"{result['matches']}"
+        f"{result.get('matches', 0)}"
     )
 
     logger.info(
         f"🟢 UP: "
-        f"{result['up']} "
-        f"({result['up_probability']:.1f}%)"
+        f"{result.get('up', 0)} "
+        f"({result.get('up_probability', 0.0):.1f}%)"
     )
 
     logger.info(
         f"🔴 DOWN: "
-        f"{result['down']} "
-        f"({result['down_probability']:.1f}%)"
+        f"{result.get('down', 0)} "
+        f"({result.get('down_probability', 0.0):.1f}%)"
     )
 
     logger.info(
         f"📊 Общая уверенность: "
-        f"{result['confidence']:.1f}%"
+        f"{result.get('confidence', 0.0):.1f}%"
     )
 
     logger.info(
         f"⚖️ Перевес: "
-        f"{result['advantage']:.1f}%"
+        f"{result.get('advantage', 0.0):.1f}%"
     )
 
     logger.info(
         f"🔥 Свежих совпадений: "
-        f"{result['recent_matches']}"
+        f"{result.get('recent_matches', 0)}"
     )
 
     logger.info(
         f"🔥 Свежая уверенность: "
-        f"{result['recent_confidence']:.1f}%"
+        f"{result.get('recent_confidence', 0.0):.1f}%"
     )
 
     if result.get("prediction"):
 
         logger.info(
             f"🚨 СИГНАЛ ОДОБРЕН: "
-            f"{result['prediction']}"
+            f"{result.get('prediction')}"
         )
 
     else:
@@ -2248,8 +2248,13 @@ def print_current_analysis(result):
             "⏭️ Сигнал отклонён"
         )
 
+    reason = result.get(
+        "reason",
+        "Причина не указана"
+    )
+
     logger.info(
-        f"ℹ️ {result.get('reason')}"
+        f"ℹ️ {reason}"
     )
 
     logger.info("-" * 65)
