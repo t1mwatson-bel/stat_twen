@@ -555,7 +555,7 @@ def build_pattern_prediction(parsed):
     ТРИГГЕРНАЯ ЛОГИКА:
 
     1. Нет #G #O #R #X
-    2. Очки игрока СТРОГО МЕНЬШЕ 20
+    2. Очки игрока СТРОГО МЕНЬШЕ 21
     3. Первая карта игрока только J/Q/K/A
     4. Ранг:
        J -> K
@@ -582,7 +582,7 @@ def build_pattern_prediction(parsed):
 
     # ------------------------------------------------
     # НОВОЕ УСЛОВИЕ:
-    # У ИГРОКА ДОЛЖНО БЫТЬ МЕНЬШЕ 20 ОЧКОВ
+    # У ИГРОКА ДОЛЖНО БЫТЬ МЕНЬШЕ 21 ОЧКОВ
     # ------------------------------------------------
 
     player_score = parsed.get("player_score")
@@ -595,10 +595,10 @@ def build_pattern_prediction(parsed):
         )
         return None
 
-    if player_score >= 20:
+    if player_score >= 21:
         print(
             f"🚫 #N{parsed.get('game_number')} — "
-            f"игрок {player_score} очков, нужно строго < 20",
+            f"игрок {player_score} очков, нужно строго < 21",
             flush=True
         )
         return None
