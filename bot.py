@@ -1,2283 +1,1432 @@
 import os
 import sys
+import json
 import time
-import sqlite3
-import logging
-import traceback
-
-from datetime import (
-    datetime,
-    timedelta,
-    timezone,
-)
-
 import requests
+import pytz
+import re
 
-
-# =====================================================================
-# SETTINGS
-# =====================================================================
-
-BASE_URL = "https://api.binarium.com"
-
-# -------------------------------------------------
-# АКТИВ
-# -------------------------------------------------
-
-ASSET_ID = 43
-ASSET_NAME = "EUR/USD"
-
-# -------------------------------------------------
-# СВЕЧИ
-# -------------------------------------------------
-
-DETAILIZATION = "5s"
-CANDLE_SECONDS = 5
-
-# -------------------------------------------------
-# БАЗА
-# -------------------------------------------------
-
-DB_FILE = "binarium_history.db"
-
+from datetime import datetime
 
 # =====================================================================
-# TELEGRAM
+# ENV
 # =====================================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+if not BOT_TOKEN:
+    BOT_TOKEN = os.getenv("BOT_TOKEN_PROGNOZ")
 
-TELEGRAM_TIMEOUT = 20
+CHANNEL_PROGNOZ = os.getenv("CHAT_ID_21")
+if not CHANNEL_PROGNOZ:
+    CHANNEL_PROGNOZ = os.getenv("CHANNEL_PROGNOZ")
 
+CHANNEL_STATS = os.getenv("CHANNEL_STATS")
 
-# =====================================================================
-# HISTORY
-# =====================================================================
-
-HISTORY_HOURS = 12
-
-CHUNK_MINUTES = 60
-
-UPDATE_INTERVAL = 3
-
-LIVE_WINDOW_MINUTES = 10
-
-REQUEST_TIMEOUT = 30
-MAX_RETRIES = 3
+if not BOT_TOKEN or not CHANNEL_PROGNOZ:
+    print("❌ Ошибка: BOT_TOKEN или CHANNEL_PROGNOZ не заданы!", flush=True)
+    sys.exit(1)
 
 
 # =====================================================================
-# PATTERN ANALYSIS
+# CONFIG
 # =====================================================================
 
-# Последние закрытые свечи для паттерна
-PATTERN_LENGTH = 6
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-# Минимум исторических совпадений
-MIN_MATCHES = 8
+PREDICTIONS_FILE = "twentyone_predictions.json"
+OFFSET_FILE = "pattern_offset.txt"
 
-# Минимум свечей в базе
-MIN_CANDLES_FOR_ANALYSIS = 500
+POLL_INTERVAL = 2.0
 
-# Минимальная общая вероятность
-MIN_CONFIDENCE = 70.0
+# Количество игр для проверки после основной цели
+DOGON_GAMES = 4
 
-# Минимальная разница между UP и DOWN
-MIN_DIRECTION_ADVANTAGE = 20.0
+# Через сколько игр даётся прогноз
+FORECAST_OFFSET = 11
 
-# -------------------------------------------------
-# ПРОВЕРКА СВЕЖИХ СОВПАДЕНИЙ
-# -------------------------------------------------
+# Запрещённые теги
+FORBIDDEN_TAGS = {"G", "O", "X", "R"}
 
-RECENT_MATCHES_TO_CHECK = 10
+# Карты, которые могут быть первой картой игрока
+SOURCE_RANKS = {"J", "Q", "K", "A"}
 
-MIN_RECENT_MATCHES = 4
+# Зеркальные ранги
+RANK_MIRROR = {
+    "J": "K",
+    "K": "J",
+    "Q": "A",
+    "A": "Q",
+}
 
-MIN_RECENT_CONFIDENCE = 60.0
+# Зеркальные масти
+SUIT_MIRROR = {
+    "♣": "♥",
+    "♥": "♣",
+    "♠": "♦",
+    "♦": "♠",
+}
 
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# =====================================================================
-# TRADE SETTINGS
-# =====================================================================
-
-# Экспирация на Binarium
-EXPIRATION_SECONDS = 60
-
-# За сколько секунд до начала минуты
-# отправлять сигнал
-SIGNAL_ADVANCE_SECONDS = 5
-
-
-# =====================================================================
-# LOGGING
-# =====================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36"
     ),
-)
+    "Accept": "application/json, text/plain, */*",
+}
 
-logger = logging.getLogger(
-    "BINARIUM"
-)
-
-
-# =====================================================================
-# HTTP SESSION
-# =====================================================================
-
-session = requests.Session()
-
-session.headers.update(
-    {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/150.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "application/json, "
-            "text/plain, "
-            "*/*"
-        ),
-        "Referer": "https://binarium.com/",
-        "Origin": "https://binarium.com",
-        "Connection": "keep-alive",
-    }
-)
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
 
 # =====================================================================
-# TIME
+# GLOBALS
 # =====================================================================
 
-def utc_now():
+predictions = []
+games_cache = {}
 
-    return datetime.now(
-        timezone.utc
-    )
+last_prediction_time = 0
 
+# Защита от повторной обработки сообщений
+processed_source_games = set()
 
-def format_api_time(dt):
-
-    dt = dt.astimezone(
-        timezone.utc
-    )
-
-    return dt.strftime(
-        "%Y-%m-%dT%H:%M:%S.000Z"
-    )
+# Минимальная пауза между прогнозами
+PREDICTION_COOLDOWN_SECONDS = 1
 
 
-def parse_api_time(value):
+# =====================================================================
+# JSON
+# =====================================================================
 
-    if not value:
-        return None
+def load_json_file(filename, default):
+    try:
+        if not os.path.exists(filename):
+            return default
 
-    value = str(value).strip()
+        with open(filename, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-    if value.endswith("Z"):
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения {filename}: {e}", flush=True)
+        return default
 
-        value = value[:-1] + "+00:00"
+
+def atomic_save_json(filename, data):
+    tmp = filename + ".tmp"
 
     try:
-
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
             )
 
-        return dt.astimezone(
-            timezone.utc
-        )
+        os.replace(tmp, filename)
+        return True
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения {filename}: {e}", flush=True)
 
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+        return False
+
+
+# =====================================================================
+# LOAD PREDICTIONS
+# =====================================================================
+
+def load_predictions():
+    global processed_source_games
+
+    data = load_json_file(PREDICTIONS_FILE, [])
+
+    if not isinstance(data, list):
+        data = []
+
+    # Восстанавливаем защиту от повторной обработки
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+
+        source_number = entry.get("source_number")
+        source_id = entry.get("source_game_id")
+
+        if source_number is not None:
+            key = make_source_key(
+                source_number,
+                source_id
+            )
+            processed_source_games.add(key)
+
+    return data
+
+
+# =====================================================================
+# GAME NUMBER
+# =====================================================================
+
+def add_game_offset(number, offset):
+    """
+    Старый механизм перехода через сутки.
+    Если игра 1438 + 11 -> корректно перейдёт в начало.
+    """
+
+    return ((int(number) - 1 + int(offset)) % 1440) + 1
+
+
+# =====================================================================
+# CARD HELPERS
+# =====================================================================
+
+def normalize_card(rank, suit):
+    """
+    Возвращает карту в едином формате:
+    A♣️
+    """
+
+    if not rank or not suit:
         return None
 
+    rank = str(rank).upper().strip()
+    suit = str(suit).replace("\ufe0f", "").strip()
 
-def timestamp_from_api_time(value):
+    if rank not in {
+        "2", "3", "4", "5",
+        "6", "7", "8", "9",
+        "10", "J", "Q", "K", "A"
+    }:
+        return None
 
-    dt = parse_api_time(
-        value
+    if suit not in {"♠", "♣", "♦", "♥"}:
+        return None
+
+    return f"{rank}{suit}\ufe0f"
+
+
+def split_card(card):
+    """
+    A♣️ -> ("A", "♣")
+    10♥️ -> ("10", "♥")
+    """
+
+    if not card:
+        return None, None
+
+    card = str(card).replace("\ufe0f", "")
+
+    match = re.fullmatch(
+        r"(10|[2-9AJQK])([♠♣♦♥])",
+        card
     )
 
-    if dt is None:
-        return 0.0
+    if not match:
+        return None, None
 
-    return dt.timestamp()
-
-
-def timestamp_to_utc_string(timestamp):
-
-    try:
-
-        dt = datetime.fromtimestamp(
-            timestamp,
-            tz=timezone.utc,
-        )
-
-        return dt.strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
-
-    except Exception:
-
-        return "Неизвестно"
+    return match.group(1), match.group(2)
 
 
 # =====================================================================
-# DATABASE
+# FORBIDDEN TAGS
 # =====================================================================
 
-def init_database():
+def get_game_tags(text):
+    """
+    Достаёт именно хэштеги.
 
-    conn = sqlite3.connect(
-        DB_FILE
+    Пример:
+    #N977 ... #T32 #R #G #O
+
+    Получим:
+    {"R", "G", "O"}
+    """
+
+    if not text:
+        return set()
+
+    tags = set()
+
+    found = re.findall(
+        r"#([A-Za-zА-Яа-яЁё])\b",
+        text.upper()
     )
 
-    cursor = conn.cursor()
+    for tag in found:
+        tag = tag.upper()
 
-    # -------------------------------------------------------------
-    # CANDLES
-    # -------------------------------------------------------------
+        # N и T — служебные части сообщения,
+        # нас интересуют остальные одиночные теги
+        if tag not in {"N", "T"}:
+            tags.add(tag)
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS candles (
-            asset_id INTEGER NOT NULL,
-            time TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            PRIMARY KEY (asset_id, time)
-        )
-        """
+    return tags
+
+
+def has_forbidden_tags(text):
+    tags = get_game_tags(text)
+
+    found_forbidden = tags & FORBIDDEN_TAGS
+
+    return bool(found_forbidden), found_forbidden
+
+
+# =====================================================================
+# PARSE COMPLETED GAME
+# =====================================================================
+
+def parse_completed_game(text):
+    """
+    Полный парсер завершённой игры.
+
+    Пример:
+
+    #N1001. ✅20(Q♣J♥Q♥J♠10♥) - 27(7♣7♥K♦9♥) #T47
+
+    Нам важно:
+    - номер игры
+    - карты игрока (левая часть)
+    - карты дилера (правая часть)
+    - теги
+    - ID
+    """
+
+    if not text:
+        return None
+
+    # Игра должна быть завершённой
+    if not re.search(r"[✅🔰]", text):
+        return None
+
+    number_match = re.search(
+        r"#N(\d+)",
+        text,
+        re.IGNORECASE
     )
 
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_candles_timestamp
-        ON candles(asset_id, timestamp)
-        """
+    if not number_match:
+        return None
+
+    game_number = int(number_match.group(1))
+
+    # ID необязателен, но сохраняем
+    id_match = re.search(
+        r"\(ID:\s*(\d+)\)",
+        text,
+        re.IGNORECASE
     )
 
-    # -------------------------------------------------------------
-    # SIGNALS
-    # -------------------------------------------------------------
+    game_id = id_match.group(1) if id_match else None
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS signals (
+    # =================================================================
+    # Ищем две группы карт:
+    #
+    # 20(Q♣J♥Q♥J♠10♥) - 27(7♣7♥K♦9♥)
+    # =================================================================
 
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            signal_time TEXT NOT NULL,
-
-            signal_timestamp REAL NOT NULL,
-
-            entry_timestamp REAL,
-
-            expiration_timestamp REAL,
-
-            entry_price REAL NOT NULL,
-
-            prediction TEXT NOT NULL,
-
-            confidence REAL NOT NULL,
-
-            matches INTEGER NOT NULL,
-
-            up_count INTEGER NOT NULL,
-
-            down_count INTEGER NOT NULL,
-
-            recent_matches INTEGER DEFAULT 0,
-
-            recent_up INTEGER DEFAULT 0,
-
-            recent_down INTEGER DEFAULT 0,
-
-            recent_confidence REAL DEFAULT 0,
-
-            pattern TEXT NOT NULL,
-
-            expiration_seconds INTEGER NOT NULL,
-
-            checked INTEGER DEFAULT 0,
-
-            result TEXT,
-
-            exit_price REAL,
-
-            checked_time TEXT,
-
-            telegram_sent INTEGER DEFAULT 0,
-
-            result_telegram_sent INTEGER DEFAULT 0
-
-        )
-        """
+    groups = re.findall(
+        r"(?:[✅🔰]?\d+)\(([^)]*)\)",
+        text
     )
 
-    # -------------------------------------------------------------
-    # MIGRATION
-    # -------------------------------------------------------------
+    if len(groups) < 2:
+        return None
 
-    columns = [
-        row[1]
-        for row in cursor.execute(
-            "PRAGMA table_info(signals)"
-        ).fetchall()
+    player_raw = groups[0]
+    dealer_raw = groups[1]
+
+    card_pattern = r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?"
+
+    player_found = re.findall(
+        card_pattern,
+        player_raw
+    )
+
+    dealer_found = re.findall(
+        card_pattern,
+        dealer_raw
+    )
+
+    player_cards = [
+        normalize_card(rank, suit)
+        for rank, suit in player_found
     ]
 
-    migrations = {
-        "entry_timestamp": (
-            "ALTER TABLE signals "
-            "ADD COLUMN entry_timestamp REAL"
-        ),
-        "expiration_timestamp": (
-            "ALTER TABLE signals "
-            "ADD COLUMN expiration_timestamp REAL"
-        ),
-        "recent_matches": (
-            "ALTER TABLE signals "
-            "ADD COLUMN recent_matches INTEGER DEFAULT 0"
-        ),
-        "recent_up": (
-            "ALTER TABLE signals "
-            "ADD COLUMN recent_up INTEGER DEFAULT 0"
-        ),
-        "recent_down": (
-            "ALTER TABLE signals "
-            "ADD COLUMN recent_down INTEGER DEFAULT 0"
-        ),
-        "recent_confidence": (
-            "ALTER TABLE signals "
-            "ADD COLUMN recent_confidence REAL DEFAULT 0"
-        ),
-        "telegram_sent": (
-            "ALTER TABLE signals "
-            "ADD COLUMN telegram_sent INTEGER DEFAULT 0"
-        ),
-        "result_telegram_sent": (
-            "ALTER TABLE signals "
-            "ADD COLUMN result_telegram_sent INTEGER DEFAULT 0"
-        ),
+    dealer_cards = [
+        normalize_card(rank, suit)
+        for rank, suit in dealer_found
+    ]
+
+    player_cards = [
+        c for c in player_cards
+        if c
+    ]
+
+    dealer_cards = [
+        c for c in dealer_cards
+        if c
+    ]
+
+    if not player_cards:
+        return None
+
+    tags = get_game_tags(text)
+
+    return {
+        "game_number": game_number,
+        "game_id": game_id,
+        "player_cards": player_cards,
+        "dealer_cards": dealer_cards,
+        "first_player_card": player_cards[0],
+        "tags": list(tags),
+        "raw_text": text,
     }
 
-    for column, sql in migrations.items():
 
-        if column not in columns:
+# =====================================================================
+# OLD PARSER FOR RESULT CHECK
+# НЕ МЕНЯЕМ ЛОГИКУ ПРОВЕРКИ РЕЗУЛЬТАТА
+# =====================================================================
 
-            try:
+def parse_cards_from_message(text):
+    """
+    Используется для проверки результата прогноза.
 
-                cursor.execute(sql)
+    Оставляем принцип:
+    - берём завершённую игру
+    - собираем все карты
+    - проверяем попадание прогнозируемой карты
+    """
 
-            except Exception:
+    if not text:
+        return None
 
-                logger.exception(
-                    f"Ошибка миграции {column}"
-                )
+    if not re.search(r"[✅🔰]", text):
+        return None
 
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_signals_checked
-        ON signals(checked)
-        """
+    match = re.search(
+        r"#N(\d+)",
+        text
     )
 
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_signals_timestamp
-        ON signals(signal_timestamp)
-        """
+    if not match:
+        return None
+
+    game_number = int(match.group(1))
+
+    found = re.findall(
+        r"(10|[2-9AJQK])([♠♣♦♥])\ufe0f?",
+        text
     )
 
-    conn.commit()
+    cards = []
 
-    conn.close()
+    for rank, suit in found:
+        card = normalize_card(rank, suit)
 
-    logger.info(
-        f"✅ База данных готова: {DB_FILE}"
+        if card:
+            cards.append(card)
+
+    # Убираем дубли, сохраняя порядок
+    cards = list(dict.fromkeys(cards))
+
+    return {
+        "game_number": game_number,
+        "cards": cards,
+    }
+
+
+# =====================================================================
+# NEW PATTERN ENGINE
+# =====================================================================
+
+def build_pattern_prediction(source_game):
+    """
+    ОСНОВНАЯ НОВАЯ ЛОГИКА.
+
+    Условия:
+
+    1. Нет тегов G/O/X/R
+    2. Первая карта игрока только J/Q/K/A
+    3. Зеркалим ранг:
+       J -> K
+       K -> J
+       Q -> A
+       A -> Q
+    4. Берём две масти:
+       исходную
+       + зеркальную
+    5. Цель = игра + 11
+    """
+
+    if not source_game:
+        return None
+
+    source_number = source_game.get("game_number")
+    source_id = source_game.get("game_id")
+
+    if source_number is None:
+        return None
+
+    raw_text = source_game.get("raw_text", "")
+
+    # ================================================================
+    # 1. ПРОВЕРКА ЗАПРЕЩЁННЫХ ТЕГОВ
+    # ================================================================
+
+    forbidden, forbidden_tags = has_forbidden_tags(raw_text)
+
+    if forbidden:
+        print(
+            f"⏭️ #{source_number} ПРОПУСК | "
+            f"запрещённые теги: "
+            f"{', '.join(sorted(forbidden_tags))}",
+            flush=True
+        )
+        return None
+
+    # ================================================================
+    # 2. ПЕРВАЯ КАРТА ИГРОКА
+    # ================================================================
+
+    first_card = source_game.get("first_player_card")
+
+    if not first_card:
+        print(
+            f"⏭️ #{source_number} ПРОПУСК | "
+            f"нет первой карты игрока",
+            flush=True
+        )
+        return None
+
+    rank, suit = split_card(first_card)
+
+    if not rank or not suit:
+        return None
+
+    # ================================================================
+    # 3. ТОЛЬКО J/Q/K/A
+    # ================================================================
+
+    if rank not in SOURCE_RANKS:
+        print(
+            f"⏭️ #{source_number} ПРОПУСК | "
+            f"первая карта {first_card}, "
+            f"не J/Q/K/A",
+            flush=True
+        )
+        return None
+
+    # ================================================================
+    # 4. ЗЕРКАЛЬНЫЙ РАНГ
+    # ================================================================
+
+    target_rank = RANK_MIRROR.get(rank)
+
+    if not target_rank:
+        return None
+
+    # ================================================================
+    # 5. ЗЕРКАЛЬНАЯ МАСТЬ
+    # ================================================================
+
+    mirror_suit = SUIT_MIRROR.get(suit)
+
+    if not mirror_suit:
+        return None
+
+    # ================================================================
+    # 6. ДВЕ ПРОГНОЗИРУЕМЫЕ КАРТЫ
+    # ================================================================
+
+    card_original_suit = normalize_card(
+        target_rank,
+        suit
     )
+
+    card_mirror_suit = normalize_card(
+        target_rank,
+        mirror_suit
+    )
+
+    predicted_cards = [
+        card_original_suit,
+        card_mirror_suit
+    ]
+
+    predicted_cards = [
+        card for card in predicted_cards
+        if card
+    ]
+
+    if not predicted_cards:
+        return None
+
+    # ================================================================
+    # 7. ЦЕЛЕВАЯ ИГРА +11
+    # ================================================================
+
+    target_number = add_game_offset(
+        source_number,
+        FORECAST_OFFSET
+    )
+
+    return {
+        "source_number": source_number,
+        "source_game_id": source_id,
+        "source_card": first_card,
+        "source_rank": rank,
+        "source_suit": suit,
+
+        "target_rank": target_rank,
+        "mirror_suit": mirror_suit,
+
+        "target_number": target_number,
+        "predicted_cards": predicted_cards,
+
+        "pattern": (
+            f"{rank}{suit} -> "
+            f"{target_rank}{suit} / "
+            f"{target_rank}{mirror_suit}"
+        )
+    }
+
+
+# =====================================================================
+# SOURCE KEY
+# =====================================================================
+
+def make_source_key(source_number, source_game_id=None):
+    """
+    Уникальный ключ источника.
+
+    Защищает от ситуации:
+    Telegram прислал одно и то же сообщение повторно.
+    """
+
+    if source_game_id:
+        return f"ID:{source_game_id}"
+
+    return f"N:{source_number}"
+
+
+# =====================================================================
+# CHECK DUPLICATES
+# =====================================================================
+
+def prediction_exists_for_source(
+    source_number,
+    source_game_id=None
+):
+    key = make_source_key(
+        source_number,
+        source_game_id
+    )
+
+    if key in processed_source_games:
+        return True
+
+    for entry in predictions:
+
+        if (
+            entry.get("source_number") == source_number
+            and
+            str(entry.get("source_game_id") or "")
+            == str(source_game_id or "")
+        ):
+            return True
+
+    return False
+
+
+def prediction_exists_for_target(target_number):
+    """
+    Дополнительная защита:
+    не создаём два pending-прогноза
+    на одну и ту же игру.
+    """
+
+    for entry in predictions:
+
+        if (
+            entry.get("target_number") == target_number
+            and entry.get("status") == "pending"
+        ):
+            return True
+
+    return False
 
 
 # =====================================================================
 # TELEGRAM
 # =====================================================================
 
-def telegram_enabled():
+def telegram_send(text, chat_id=None):
 
-    if not BOT_TOKEN:
-
-        logger.warning(
-            "⚠️ BOT_TOKEN не найден "
-            "в переменных окружения"
-        )
-
-        return False
-
-    if not CHANNEL_ID:
-
-        logger.warning(
-            "⚠️ CHANNEL_ID не найден "
-            "в переменных окружения"
-        )
-
-        return False
-
-    return True
-
-
-def send_telegram_message(text):
-
-    if not telegram_enabled():
-
-        return False
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{BOT_TOKEN}/sendMessage"
-    )
-
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+    if not chat_id:
+        chat_id = CHANNEL_PROGNOZ
 
     try:
-
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=TELEGRAM_TIMEOUT,
+        response = SESSION.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            },
+            timeout=10
         )
 
-        if response.status_code != 200:
+        data = response.json()
 
-            logger.error(
-                f"❌ Telegram HTTP "
-                f"{response.status_code}: "
-                f"{response.text}"
-            )
+        if data.get("ok"):
+            return data["result"]["message_id"]
 
-            return False
-
-        result = response.json()
-
-        if not result.get("ok"):
-
-            logger.error(
-                f"❌ Telegram API: "
-                f"{result}"
-            )
-
-            return False
-
-        logger.info(
-            "📨 Telegram сообщение отправлено"
+        print(
+            f"❌ Telegram: {data}",
+            flush=True
         )
-
-        return True
 
     except Exception as e:
-
-        logger.error(
-            f"❌ Ошибка Telegram: {e}"
-        )
-
-        return False
-
-
-# =====================================================================
-# REQUEST CANDLES
-# =====================================================================
-
-def request_candles(
-    start_dt,
-    end_dt,
-):
-
-    url = (
-        f"{BASE_URL}"
-        f"/api/v1/assets/"
-        f"{ASSET_ID}/candles"
-    )
-
-    params = {
-        "from": format_api_time(start_dt),
-        "to": format_api_time(end_dt),
-        "detalization": DETAILIZATION,
-    }
-
-    for attempt in range(
-        1,
-        MAX_RETRIES + 1,
-    ):
-
-        try:
-
-            response = session.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-            )
-
-            logger.info(
-                "HTTP %s | %.2f KB",
-                response.status_code,
-                len(response.content) / 1024,
-            )
-
-            if response.status_code != 200:
-
-                if attempt < MAX_RETRIES:
-
-                    time.sleep(
-                        attempt * 2
-                    )
-
-                    continue
-
-                return []
-
-            try:
-
-                result = response.json()
-
-            except Exception:
-
-                logger.error(
-                    "❌ Не удалось разобрать JSON"
-                )
-
-                return []
-
-            if "errors" in result:
-
-                logger.error(
-                    f"❌ API ошибка: "
-                    f"{result['errors']}"
-                )
-
-                return []
-
-            data = result.get("data")
-
-            if not isinstance(
-                data,
-                list,
-            ):
-
-                return []
-
-            return data
-
-        except requests.RequestException as e:
-
-            logger.warning(
-                f"⚠️ HTTP ошибка: {e}"
-            )
-
-            if attempt < MAX_RETRIES:
-
-                time.sleep(
-                    attempt * 2
-                )
-
-                continue
-
-            return []
-
-        except Exception:
-
-            logger.exception(
-                "❌ Ошибка запроса свечей"
-            )
-
-            return []
-
-    return []
-
-
-# =====================================================================
-# NORMALIZE
-# =====================================================================
-
-def normalize_candles(raw_candles):
-
-    result = []
-
-    for item in raw_candles:
-
-        if not isinstance(item, dict):
-            continue
-
-        candle_time = item.get("time")
-
-        if not candle_time:
-            continue
-
-        try:
-
-            open_price = float(
-                item["open"]
-            )
-
-            high_price = float(
-                item["high"]
-            )
-
-            low_price = float(
-                item["low"]
-            )
-
-            close_price = float(
-                item["close"]
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError,
-        ):
-
-            continue
-
-        timestamp = timestamp_from_api_time(
-            candle_time
-        )
-
-        if timestamp <= 0:
-            continue
-
-        result.append(
-            {
-                "asset_id": ASSET_ID,
-                "time": candle_time,
-                "timestamp": timestamp,
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-            }
-        )
-
-    result.sort(
-        key=lambda x: x["timestamp"]
-    )
-
-    return result
-
-
-# =====================================================================
-# SAVE CANDLES
-# =====================================================================
-
-def save_candles(candles):
-
-    if not candles:
-        return 0
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conn.cursor()
-
-    new_saved = 0
-
-    try:
-
-        for candle in candles:
-
-            cursor.execute(
-                """
-                SELECT 1
-                FROM candles
-                WHERE asset_id = ?
-                AND time = ?
-                LIMIT 1
-                """,
-                (
-                    candle["asset_id"],
-                    candle["time"],
-                ),
-            )
-
-            exists = cursor.fetchone()
-
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO candles (
-                    asset_id,
-                    time,
-                    timestamp,
-                    open,
-                    high,
-                    low,
-                    close
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    candle["asset_id"],
-                    candle["time"],
-                    candle["timestamp"],
-                    candle["open"],
-                    candle["high"],
-                    candle["low"],
-                    candle["close"],
-                ),
-            )
-
-            if not exists:
-
-                new_saved += 1
-
-        conn.commit()
-
-    finally:
-
-        conn.close()
-
-    return new_saved
-
-
-# =====================================================================
-# DATABASE STATS
-# =====================================================================
-
-def get_database_stats():
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            COUNT(*),
-            MIN(time),
-            MAX(time)
-        FROM candles
-        WHERE asset_id = ?
-        """,
-        (ASSET_ID,),
-    )
-
-    row = cursor.fetchone()
-
-    conn.close()
-
-    if not row:
-
-        return 0, None, None
-
-    return (
-        row[0] or 0,
-        row[1],
-        row[2],
-    )
-
-
-# =====================================================================
-# LOAD CANDLES
-# =====================================================================
-
-def load_candles_from_database():
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            time,
-            timestamp,
-            open,
-            high,
-            low,
-            close
-        FROM candles
-        WHERE asset_id = ?
-        ORDER BY timestamp ASC
-        """,
-        (ASSET_ID,),
-    )
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    candles = []
-
-    for row in rows:
-
-        candles.append(
-            {
-                "time": row[0],
-                "timestamp": row[1],
-                "open": row[2],
-                "high": row[3],
-                "low": row[4],
-                "close": row[5],
-            }
-        )
-
-    return candles
-
-
-# =====================================================================
-# DOWNLOAD HISTORY
-# =====================================================================
-
-def download_history():
-
-    count, _, _ = get_database_stats()
-
-    if count > 0:
-
-        logger.info(
-            f"📚 База уже содержит "
-            f"{count} свечей"
-        )
-
-        return
-
-    logger.info(
-        "📥 ПЕРВАЯ ЗАГРУЗКА ИСТОРИИ"
-    )
-
-    end_dt = utc_now()
-
-    start_dt = (
-        end_dt
-        - timedelta(
-            hours=HISTORY_HOURS
-        )
-    )
-
-    current = start_dt
-
-    total_saved = 0
-
-    while current < end_dt:
-
-        chunk_end = (
-            current
-            + timedelta(
-                minutes=CHUNK_MINUTES
-            )
-        )
-
-        if chunk_end > end_dt:
-
-            chunk_end = end_dt
-
-        raw = request_candles(
-            current,
-            chunk_end,
-        )
-
-        candles = normalize_candles(
-            raw
-        )
-
-        saved = save_candles(
-            candles
-        )
-
-        total_saved += saved
-
-        logger.info(
-            f"💾 Новых свечей: "
-            f"{saved}"
-        )
-
-        current = chunk_end
-
-        time.sleep(0.3)
-
-    logger.info(
-        f"✅ История загружена: "
-        f"{total_saved}"
-    )
-
-
-# =====================================================================
-# UPDATE RECENT CANDLES
-# =====================================================================
-
-def update_recent_candles():
-
-    end_dt = utc_now()
-
-    start_dt = (
-        end_dt
-        - timedelta(
-            minutes=LIVE_WINDOW_MINUTES
-        )
-    )
-
-    raw = request_candles(
-        start_dt,
-        end_dt,
-    )
-
-    if not raw:
-
-        return 0
-
-    candles = normalize_candles(
-        raw
-    )
-
-    return save_candles(
-        candles
-    )
-
-
-# =====================================================================
-# CLOSED CANDLES
-# =====================================================================
-
-def get_closed_candles(candles):
-
-    now_timestamp = time.time()
-
-    closed = []
-
-    for candle in candles:
-
-        timestamp = candle.get(
-            "timestamp"
-        )
-
-        if timestamp is None:
-            continue
-
-        if (
-            timestamp
-            + CANDLE_SECONDS
-            <= now_timestamp
-        ):
-
-            closed.append(candle)
-
-    return closed
-
-
-# =====================================================================
-# CANDLE DIRECTION
-# =====================================================================
-
-def candle_direction(candle):
-
-    open_price = candle.get("open")
-    close_price = candle.get("close")
-
-    if (
-        open_price is None
-        or close_price is None
-    ):
-
-        return None
-
-    if close_price > open_price:
-        return "UP"
-
-    if close_price < open_price:
-        return "DOWN"
-
-    return "FLAT"
-
-
-# =====================================================================
-# BUILD DIRECTIONS
-# =====================================================================
-
-def build_directions(candles):
-
-    return [
-        candle_direction(candle)
-        for candle in candles
-    ]
-
-
-# =====================================================================
-# PATTERN TO TEXT
-# =====================================================================
-
-def pattern_to_text(pattern):
-
-    symbols = {
-        "UP": "🟢",
-        "DOWN": "🔴",
-        "FLAT": "⚪",
-    }
-
-    return "".join(
-        symbols.get(item, "?")
-        for item in pattern
-    )
-
-
-# =====================================================================
-# FIND PATTERN MATCHES
-# =====================================================================
-
-def find_pattern_matches(
-    directions,
-    pattern,
-):
-
-    matches = []
-
-    pattern_length = len(pattern)
-
-    current_pattern_start = (
-        len(directions)
-        - pattern_length
-    )
-
-    # Исторический паттерн не должен пересекаться
-    # с текущим паттерном
-    max_index = (
-        current_pattern_start - 1
-    )
-
-    for i in range(
-        pattern_length,
-        max_index + 1,
-    ):
-
-        historical_pattern = directions[
-            i - pattern_length:i
-        ]
-
-        if historical_pattern != pattern:
-            continue
-
-        next_direction = directions[i]
-
-        if next_direction not in (
-            "UP",
-            "DOWN",
-        ):
-            continue
-
-        matches.append(
-            {
-                "index": i,
-                "next": next_direction,
-            }
-        )
-
-    return matches
-
-
-# =====================================================================
-# CALCULATE MATCH STATISTICS
-# =====================================================================
-
-def calculate_match_statistics(matches):
-
-    up = sum(
-        1
-        for match in matches
-        if match["next"] == "UP"
-    )
-
-    down = sum(
-        1
-        for match in matches
-        if match["next"] == "DOWN"
-    )
-
-    total = up + down
-
-    if total <= 0:
-
-        return {
-            "total": 0,
-            "up": 0,
-            "down": 0,
-            "up_probability": 0.0,
-            "down_probability": 0.0,
-            "prediction": None,
-            "confidence": 0.0,
-            "advantage": 0.0,
-        }
-
-    up_probability = (
-        up / total * 100
-    )
-
-    down_probability = (
-        down / total * 100
-    )
-
-    prediction = None
-    confidence = 0.0
-
-    if up_probability > down_probability:
-
-        prediction = "UP"
-        confidence = up_probability
-
-    elif down_probability > up_probability:
-
-        prediction = "DOWN"
-        confidence = down_probability
-
-    advantage = abs(
-        up_probability
-        - down_probability
-    )
-
-    return {
-        "total": total,
-        "up": up,
-        "down": down,
-        "up_probability": up_probability,
-        "down_probability": down_probability,
-        "prediction": prediction,
-        "confidence": confidence,
-        "advantage": advantage,
-    }
-
-
-# =====================================================================
-# ANALYZE PATTERN
-# =====================================================================
-
-def analyze_pattern(candles):
-
-    closed_candles = get_closed_candles(
-        candles
-    )
-
-    if (
-        len(closed_candles)
-        < MIN_CANDLES_FOR_ANALYSIS
-    ):
-
-        return None
-
-    directions = build_directions(
-        closed_candles
-    )
-
-    current_pattern = directions[
-        -PATTERN_LENGTH:
-    ]
-
-    signal_candle = closed_candles[-1]
-
-    if None in current_pattern:
-
-        return None
-
-    if "FLAT" in current_pattern:
-
-        return {
-            "pattern": current_pattern,
-            "prediction": None,
-            "confidence": 0.0,
-            "matches": 0,
-            "up": 0,
-            "down": 0,
-            "up_probability": 0.0,
-            "down_probability": 0.0,
-            "recent_matches": 0,
-            "recent_up": 0,
-            "recent_down": 0,
-            "recent_confidence": 0.0,
-            "reason": "В паттерне есть FLAT",
-            "signal_candle": signal_candle,
-        }
-
-    matches = find_pattern_matches(
-        directions,
-        current_pattern,
-    )
-
-    overall = calculate_match_statistics(
-        matches
-    )
-
-    # Последние совпадения ближе к текущему моменту
-    recent_matches = matches[
-        -RECENT_MATCHES_TO_CHECK:
-    ]
-
-    recent = calculate_match_statistics(
-        recent_matches
-    )
-
-    prediction = None
-    confidence = overall["confidence"]
-    reason = ""
-
-    # -------------------------------------------------------------
-    # FILTER 1 — МАЛО ДАННЫХ
-    # -------------------------------------------------------------
-
-    if overall["total"] < MIN_MATCHES:
-
-        reason = (
-            f"Недостаточно совпадений: "
-            f"{overall['total']}/{MIN_MATCHES}"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 2 — НЕТ НАПРАВЛЕНИЯ
-    # -------------------------------------------------------------
-
-    elif not overall["prediction"]:
-
-        reason = (
-            "Нет явного направления"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 3 — ОБЩАЯ УВЕРЕННОСТЬ
-    # -------------------------------------------------------------
-
-    elif (
-        overall["confidence"]
-        < MIN_CONFIDENCE
-    ):
-
-        reason = (
-            f"Общая уверенность "
-            f"{overall['confidence']:.1f}% "
-            f"ниже {MIN_CONFIDENCE}%"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 4 — ПЕРЕВЕС
-    # -------------------------------------------------------------
-
-    elif (
-        overall["advantage"]
-        < MIN_DIRECTION_ADVANTAGE
-    ):
-
-        reason = (
-            f"Маленький перевес: "
-            f"{overall['advantage']:.1f}%"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 5 — СВЕЖАЯ СТАТИСТИКА
-    # -------------------------------------------------------------
-
-    elif (
-        recent["total"]
-        < MIN_RECENT_MATCHES
-    ):
-
-        reason = (
-            f"Недостаточно свежих совпадений: "
-            f"{recent['total']}/"
-            f"{MIN_RECENT_MATCHES}"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 6 — СВЕЖАЯ СТАТИСТИКА ПРОТИВ
-    # -------------------------------------------------------------
-
-    elif (
-        recent["prediction"]
-        != overall["prediction"]
-    ):
-
-        reason = (
-            "Свежая статистика "
-            "противоречит общей"
-        )
-
-    # -------------------------------------------------------------
-    # FILTER 7 — СВЕЖАЯ УВЕРЕННОСТЬ
-    # -------------------------------------------------------------
-
-    elif (
-        recent["confidence"]
-        < MIN_RECENT_CONFIDENCE
-    ):
-
-        reason = (
-            f"Свежая уверенность "
-            f"{recent['confidence']:.1f}% "
-            f"ниже "
-            f"{MIN_RECENT_CONFIDENCE}%"
-        )
-
-    # -------------------------------------------------------------
-    # SIGNAL APPROVED
-    # -------------------------------------------------------------
-
-    else:
-
-        prediction = overall["prediction"]
-
-        reason = (
-            "Сигнал прошёл все "
-            "статистические фильтры"
-        )
-
-    return {
-        "pattern": current_pattern,
-
-        "matches": overall["total"],
-
-        "up": overall["up"],
-        "down": overall["down"],
-
-        "up_probability":
-            overall["up_probability"],
-
-        "down_probability":
-            overall["down_probability"],
-
-        "prediction": prediction,
-
-        "confidence": confidence,
-
-        "advantage":
-            overall["advantage"],
-
-        "recent_matches":
-            recent["total"],
-
-        "recent_up":
-            recent["up"],
-
-        "recent_down":
-            recent["down"],
-
-        "recent_confidence":
-            recent["confidence"],
-
-        "reason": reason,
-
-        "signal_candle":
-            signal_candle,
-    }
-
-
-# =====================================================================
-# CALCULATE NEXT MINUTE ENTRY
-# =====================================================================
-
-def calculate_entry_time():
-
-    now = time.time()
-
-    next_minute = (
-        int(now // 60) + 1
-    ) * 60
-
-    return float(next_minute)
-
-
-# =====================================================================
-# CHECK ACTIVE SIGNAL
-# =====================================================================
-
-def has_active_signal():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM signals
-        WHERE checked = 0
-        """
-    )
-
-    count = cursor.fetchone()[0]
-
-    conn.close()
-
-    return count > 0
-
-
-# =====================================================================
-# SIGNAL EXISTS
-# =====================================================================
-
-def signal_exists_for_entry(
-    entry_timestamp,
-):
-
-    conn = sqlite3.connect(DB_FILE)
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT id
-        FROM signals
-        WHERE entry_timestamp = ?
-        LIMIT 1
-        """,
-        (entry_timestamp,),
-    )
-
-    row = cursor.fetchone()
-
-    conn.close()
-
-    return row is not None
-
-
-# =====================================================================
-# GET ENTRY PRICE
-# =====================================================================
-
-def get_entry_price(
-    candles,
-    entry_timestamp,
-):
-
-    candidates = []
-
-    for candle in candles:
-
-        timestamp = candle.get(
-            "timestamp"
-        )
-
-        if timestamp is None:
-            continue
-
-        if timestamp >= (
-            entry_timestamp
-            - CANDLE_SECONDS
-        ):
-
-            candidates.append(candle)
-
-    if candidates:
-
-        return candidates[-1].get(
-            "close"
-        )
-
-    if candles:
-
-        return candles[-1].get(
-            "close"
+        print(
+            f"❌ Telegram ошибка: {e}",
+            flush=True
         )
 
     return None
 
 
-# =====================================================================
-# SAVE SIGNAL
-# =====================================================================
-
-def save_signal(
-    result,
-    candle,
-    entry_timestamp,
+def telegram_edit(
+    message_id,
+    text,
+    chat_id=None
 ):
 
-    prediction = result.get(
-        "prediction"
+    if not message_id:
+        return False
+
+    if not chat_id:
+        chat_id = CHANNEL_PROGNOZ
+
+    try:
+        response = SESSION.post(
+            f"{TELEGRAM_API}/editMessageText",
+            json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+
+        return bool(
+            response.json().get("ok")
+        )
+
+    except Exception as e:
+        print(
+            f"⚠️ Ошибка редактирования: {e}",
+            flush=True
+        )
+
+        return False
+
+
+# =====================================================================
+# PREDICTION MESSAGE
+# =====================================================================
+
+def make_prediction_message(entry):
+
+    source_number = entry["source_number"]
+    target_number = entry["target_number"]
+
+    source_card = entry["source_card"]
+
+    predicted_cards = entry["predicted_cards"]
+
+    card1 = (
+        predicted_cards[0]
+        if len(predicted_cards) > 0
+        else "—"
     )
 
-    if prediction not in (
-        "UP",
-        "DOWN",
+    card2 = (
+        predicted_cards[1]
+        if len(predicted_cards) > 1
+        else "—"
+    )
+
+    text = (
+        f"🎯 Игра: #N{target_number}\n"
+        f"🃏 {card1}\n"
+        f"🃏 {card2}"
+    )
+
+    return text
+
+
+# =====================================================================
+# CREATE PREDICTION
+# =====================================================================
+
+def create_pattern_prediction(source_game):
+
+    global last_prediction_time
+    global predictions
+    global processed_source_games
+
+    if not source_game:
+        return None
+
+    source_number = source_game.get("game_number")
+    source_id = source_game.get("game_id")
+
+    if source_number is None:
+        return None
+
+    # ================================================================
+    # ЗАЩИТА ОТ ПОВТОРА ИСТОЧНИКА
+    # ================================================================
+
+    if prediction_exists_for_source(
+        source_number,
+        source_id
     ):
+        print(
+            f"⏭️ #{source_number} уже обработана ранее",
+            flush=True
+        )
+        return None
+
+    # ================================================================
+    # СОЗДАЁМ ПАТТЕРН
+    # ================================================================
+
+    result = build_pattern_prediction(
+        source_game
+    )
+
+    if not result:
+        return None
+
+    target_number = result["target_number"]
+
+    # ================================================================
+    # ЗАЩИТА ОТ ДВУХ ПРОГНОЗОВ НА ОДНУ ЦЕЛЬ
+    # ================================================================
+
+    if prediction_exists_for_target(
+        target_number
+    ):
+        print(
+            f"⏭️ На #N{target_number} "
+            f"уже есть pending-прогноз",
+            flush=True
+        )
+
+        # Источник всё равно помечаем обработанным,
+        # чтобы не пытаться снова
+        key = make_source_key(
+            source_number,
+            source_id
+        )
+
+        processed_source_games.add(key)
 
         return None
 
-    if has_active_signal():
+    # ================================================================
+    # COOLDOWN
+    # ================================================================
 
-        logger.info(
-            "⏳ Уже есть активный сигнал"
+    now_ts = time.time()
+
+    if (
+        now_ts - last_prediction_time
+        < PREDICTION_COOLDOWN_SECONDS
+    ):
+        print(
+            f"⏭️ Cooldown "
+            f"{PREDICTION_COOLDOWN_SECONDS} сек",
+            flush=True
         )
 
         return None
 
-    if signal_exists_for_entry(
-        entry_timestamp
-    ):
+    # ================================================================
+    # ЛОГ
+    # ================================================================
 
-        logger.info(
-            "⏭️ Сигнал на эту минуту "
-            "уже существует"
-        )
-
-        return None
-
-    entry_price = candle.get("close")
-
-    if entry_price is None:
-
-        return None
-
-    expiration_timestamp = (
-        entry_timestamp
-        + EXPIRATION_SECONDS
+    print(
+        "\n"
+        "══════════════════════════════════════",
+        flush=True
     )
 
-    pattern_text = ",".join(
-        result.get("pattern", [])
+    print(
+        "🧠 НОВЫЙ ПАТТЕРН НАЙДЕН",
+        flush=True
     )
 
-    conn = sqlite3.connect(DB_FILE)
+    print(
+        f"📌 Источник: #N{source_number}",
+        flush=True
+    )
 
-    cursor = conn.cursor()
+    print(
+        f"🃏 Первая карта игрока: "
+        f"{result['source_card']}",
+        flush=True
+    )
+
+    print(
+        f"🔄 Зеркальный ранг: "
+        f"{result['target_rank']}",
+        flush=True
+    )
+
+    print(
+        f"🎯 Цель +{FORECAST_OFFSET}: "
+        f"#N{target_number}",
+        flush=True
+    )
+
+    print(
+        f"🔮 Прогноз: "
+        f"{' / '.join(result['predicted_cards'])}",
+        flush=True
+    )
+
+    print(
+        "══════════════════════════════════════",
+        flush=True
+    )
+
+    # ================================================================
+    # СОЗДАЁМ ЗАПИСЬ
+    # ================================================================
+
+    entry = {
+        # Источник
+        "source_number": source_number,
+        "source_game_id": source_id,
+        "source_card": result["source_card"],
+
+        # Цель
+        "target_number": target_number,
+
+        # Прогноз
+        "predicted_cards": result["predicted_cards"],
+
+        # Информация о паттерне
+        "pattern": result["pattern"],
+
+        # Статус
+        "status": "pending",
+
+        # Догон
+        "current_dogon": 0,
+
+        # Время
+        "created_at": datetime.now(
+            MOSCOW_TZ
+        ).isoformat(),
+
+        # Telegram
+        "message_id": None,
+        "original_text": "",
+
+        # Результат
+        "result_game": None,
+        "found_card": None
+    }
+
+    # Добавляем сразу
+    predictions.append(entry)
+
+    # Помечаем источник обработанным
+    key = make_source_key(
+        source_number,
+        source_id
+    )
+
+    processed_source_games.add(key)
+
+    # Сохраняем ДО отправки
+    atomic_save_json(
+        PREDICTIONS_FILE,
+        predictions
+    )
+
+    last_prediction_time = now_ts
+
+    return entry
+
+
+# =====================================================================
+# OFFSET
+# =====================================================================
+
+def get_offset():
+
+    try:
+        if os.path.exists(OFFSET_FILE):
+
+            with open(
+                OFFSET_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                return int(
+                    f.read().strip()
+                )
+
+    except Exception:
+        pass
+
+    return 0
+
+
+def save_offset(offset):
+
+    try:
+        with open(
+            OFFSET_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            f.write(str(offset))
+
+    except Exception:
+        pass
+
+
+# =====================================================================
+# PROCESS TELEGRAM UPDATES
+# =====================================================================
+
+def process_telegram_updates(offset):
+
+    global predictions
+    global games_cache
+
+    if not CHANNEL_STATS:
+        return offset
 
     try:
 
-        cursor.execute(
-            """
-            INSERT INTO signals (
-
-                signal_time,
-                signal_timestamp,
-
-                entry_timestamp,
-                expiration_timestamp,
-
-                entry_price,
-
-                prediction,
-
-                confidence,
-
-                matches,
-
-                up_count,
-                down_count,
-
-                recent_matches,
-                recent_up,
-                recent_down,
-                recent_confidence,
-
-                pattern,
-
-                expiration_seconds,
-
-                checked
-
-            )
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, 0
-            )
-            """,
-            (
-                candle.get("time"),
-                candle.get("timestamp"),
-
-                entry_timestamp,
-                expiration_timestamp,
-
-                entry_price,
-
-                prediction,
-
-                result.get(
-                    "confidence",
-                    0.0,
-                ),
-
-                result.get(
-                    "matches",
-                    0,
-                ),
-
-                result.get(
-                    "up",
-                    0,
-                ),
-
-                result.get(
-                    "down",
-                    0,
-                ),
-
-                result.get(
-                    "recent_matches",
-                    0,
-                ),
-
-                result.get(
-                    "recent_up",
-                    0,
-                ),
-
-                result.get(
-                    "recent_down",
-                    0,
-                ),
-
-                result.get(
-                    "recent_confidence",
-                    0.0,
-                ),
-
-                pattern_text,
-
-                EXPIRATION_SECONDS,
-            ),
+        response = SESSION.get(
+            f"{TELEGRAM_API}/getUpdates",
+            params={
+                "offset": offset,
+                "timeout": 3,
+                "limit": 50,
+            },
+            timeout=10,
         )
 
-        signal_id = cursor.lastrowid
+        data = response.json()
 
-        conn.commit()
+        if not data.get("ok"):
+            return offset
 
-        return {
-            "id": signal_id,
-            "entry_price": entry_price,
-            "entry_timestamp": entry_timestamp,
-            "expiration_timestamp":
-                expiration_timestamp,
-        }
+        for update in data.get("result", []):
 
-    except Exception:
+            update_id = update.get("update_id")
 
-        logger.exception(
-            "❌ Ошибка сохранения сигнала"
-        )
+            if update_id is not None:
 
-        return None
+                offset = update_id + 1
 
-    finally:
+                save_offset(offset)
 
-        conn.close()
-
-
-# =====================================================================
-# SEND SIGNAL TELEGRAM
-# =====================================================================
-
-def send_signal_telegram(
-    result,
-    signal_data,
-):
-
-    prediction = result["prediction"]
-
-    if prediction == "UP":
-
-        direction_text = (
-            "🚀 ВЫШЕ 🟢"
-        )
-
-    else:
-
-        direction_text = (
-            "📉 НИЖЕ 🔴"
-        )
-
-    entry_time = timestamp_to_utc_string(
-        signal_data["entry_timestamp"]
-    )
-
-    expiration_time = timestamp_to_utc_string(
-        signal_data[
-            "expiration_timestamp"
-        ]
-    )
-
-    text = (
-        "🚨 *НОВЫЙ СИГНАЛ*\n\n"
-
-        f"💱 *Актив:* `{ASSET_NAME}`\n\n"
-
-        f"🎯 *НАПРАВЛЕНИЕ:* "
-        f"{direction_text}\n\n"
-
-        f"⏰ *ТОЧКА ВХОДА:*\n"
-        f"`{entry_time}`\n\n"
-
-        f"⏱ *ЭКСПИРАЦИЯ:*\n"
-        f"`1 МИНУТА`\n\n"
-
-        f"🏁 *ВРЕМЯ ПРОВЕРКИ:*\n"
-        f"`{expiration_time}`\n\n"
-
-        f"💰 Ориентир цены: "
-        f"`{signal_data['entry_price']}`\n\n"
-
-        f"🧩 Паттерн: "
-        f"{pattern_to_text(result['pattern'])}\n\n"
-
-        f"📊 Общая статистика:\n"
-        f"🔎 Совпадений: "
-        f"*{result['matches']}*\n"
-        f"🟢 UP: "
-        f"{result['up']} "
-        f"({result['up_probability']:.1f}%)\n"
-        f"🔴 DOWN: "
-        f"{result['down']} "
-        f"({result['down_probability']:.1f}%)\n\n"
-
-        f"🔥 Свежая статистика:\n"
-        f"🔎 Совпадений: "
-        f"{result['recent_matches']}\n"
-        f"🟢 UP: "
-        f"{result['recent_up']}\n"
-        f"🔴 DOWN: "
-        f"{result['recent_down']}\n"
-        f"🎯 Уверенность: "
-        f"{result['recent_confidence']:.1f}%\n\n"
-
-        f"⚡️ *ПРОГНОЗ:* "
-        f"*{direction_text}*"
-    )
-
-    success = send_telegram_message(
-        text
-    )
-
-    if success:
-
-        conn = sqlite3.connect(DB_FILE)
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            UPDATE signals
-            SET telegram_sent = 1
-            WHERE id = ?
-            """,
-            (signal_data["id"],),
-        )
-
-        conn.commit()
-        conn.close()
-
-    return success
-
-
-# =====================================================================
-# SEND RESULT TELEGRAM
-# =====================================================================
-
-def send_result_telegram(
-    signal_id,
-    prediction,
-    result,
-    entry_price,
-    exit_price,
-    entry_timestamp,
-    expiration_timestamp,
-):
-
-    if result == "WIN":
-
-        result_text = (
-            "✅ *ЗАШЛО!*"
-        )
-
-    else:
-
-        result_text = (
-            "❌ *НЕ ЗАШЛО*"
-        )
-
-    if prediction == "UP":
-
-        prediction_text = "ВЫШЕ 🟢"
-
-    else:
-
-        prediction_text = "НИЖЕ 🔴"
-
-    entry_time = timestamp_to_utc_string(
-        entry_timestamp
-    )
-
-    exit_time = timestamp_to_utc_string(
-        expiration_timestamp
-    )
-
-    text = (
-        "📊 *РЕЗУЛЬТАТ СИГНАЛА*\n\n"
-
-        f"💱 *Актив:* `{ASSET_NAME}`\n\n"
-
-        f"🎯 Прогноз: "
-        f"*{prediction_text}*\n\n"
-
-        f"⏰ Вход: "
-        f"`{entry_time}`\n"
-
-        f"🏁 Проверка: "
-        f"`{exit_time}`\n\n"
-
-        f"💰 Цена входа: "
-        f"`{entry_price}`\n"
-
-        f"💰 Цена выхода: "
-        f"`{exit_price}`\n\n"
-
-        f"{result_text}"
-    )
-
-    success = send_telegram_message(
-        text
-    )
-
-    if success:
-
-        conn = sqlite3.connect(DB_FILE)
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            UPDATE signals
-            SET result_telegram_sent = 1
-            WHERE id = ?
-            """,
-            (signal_id,),
-        )
-
-        conn.commit()
-        conn.close()
-
-    return success
-
-
-# =====================================================================
-# CHECK PENDING SIGNALS
-# =====================================================================
-
-def check_pending_signals(candles):
-
-    if not candles:
-        return
-
-    now = time.time()
-
-    conn = sqlite3.connect(DB_FILE)
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            id,
-            signal_time,
-            signal_timestamp,
-
-            entry_timestamp,
-            expiration_timestamp,
-
-            entry_price,
-
-            prediction,
-
-            confidence,
-
-            expiration_seconds,
-
-            result_telegram_sent
-
-        FROM signals
-
-        WHERE checked = 0
-
-        ORDER BY id ASC
-        """
-    )
-
-    signals = cursor.fetchall()
-
-    if not signals:
-
-        conn.close()
-        return
-
-    for signal in signals:
-
-        signal_id = signal[0]
-
-        signal_time = signal[1]
-
-        signal_timestamp = signal[2]
-
-        entry_timestamp = signal[3]
-
-        expiration_timestamp = signal[4]
-
-        entry_price = signal[5]
-
-        prediction = signal[6]
-
-        confidence = signal[7]
-
-        expiration_seconds = signal[8]
-
-        result_telegram_sent = signal[9]
-
-        if not expiration_timestamp:
-
-            expiration_timestamp = (
-                signal_timestamp
-                + expiration_seconds
+            # Берём новые и редактированные сообщения
+            post = (
+                update.get("channel_post")
+                or update.get("edited_channel_post")
             )
 
-        # Ждём окончания экспирации
-        if now < expiration_timestamp:
-
-            continue
-
-        # Ищем первую полностью закрытую свечу
-        # после окончания экспирации
-
-        exit_candle = None
-
-        for candle in candles:
-
-            timestamp = candle.get(
-                "timestamp"
-            )
-
-            if timestamp is None:
+            if not post:
                 continue
 
-            candle_close = (
-                timestamp
-                + CANDLE_SECONDS
+            chat_id = str(
+                post.get("chat", {}).get("id", "")
             )
 
-            if (
-                timestamp
-                >= expiration_timestamp
-                and candle_close
-                <= now
-            ):
+            if chat_id != str(CHANNEL_STATS):
+                continue
 
-                exit_candle = candle
-                break
+            text = post.get("text", "")
 
-        if not exit_candle:
+            if not text:
+                continue
 
-            continue
+            # =========================================================
+            # 1. ПАРСИМ ЗАВЕРШЁННУЮ ИГРУ
+            # =========================================================
 
-        exit_price = exit_candle.get(
-            "close"
-        )
-
-        exit_time = exit_candle.get(
-            "time"
-        )
-
-        if exit_price is None:
-
-            continue
-
-        result = "LOSE"
-
-        if prediction == "UP":
-
-            if exit_price > entry_price:
-
-                result = "WIN"
-
-        elif prediction == "DOWN":
-
-            if exit_price < entry_price:
-
-                result = "WIN"
-
-        cursor.execute(
-            """
-            UPDATE signals
-            SET
-                checked = 1,
-                result = ?,
-                exit_price = ?,
-                checked_time = ?,
-                expiration_timestamp = ?
-            WHERE id = ?
-            """,
-            (
-                result,
-                exit_price,
-                exit_time,
-                expiration_timestamp,
-                signal_id,
-            ),
-        )
-
-        conn.commit()
-
-        logger.info("")
-        logger.info("=" * 65)
-        logger.info("🔍 ПРОВЕРКА СИГНАЛА")
-        logger.info("=" * 65)
-
-        logger.info(
-            f"💱 Актив: {ASSET_NAME}"
-        )
-
-        logger.info(
-            f"🎯 Прогноз: {prediction}"
-        )
-
-        logger.info(
-            f"💰 Вход: {entry_price}"
-        )
-
-        logger.info(
-            f"💰 Выход: {exit_price}"
-        )
-
-        logger.info(
-            f"📊 Уверенность: "
-            f"{confidence:.1f}%"
-        )
-
-        if result == "WIN":
-
-            logger.info(
-                "✅ ЗАШЛО!"
+            completed_game = parse_completed_game(
+                text
             )
 
-        else:
+            if not completed_game:
+                continue
 
-            logger.info(
-                "❌ НЕ ЗАШЛО!"
+            game_number = completed_game[
+                "game_number"
+            ]
+
+            # =========================================================
+            # 2. СОХРАНЯЕМ В КЭШ ДЛЯ ПРОВЕРКИ РЕЗУЛЬТАТА
+            # =========================================================
+
+            parsed_result = parse_cards_from_message(
+                text
             )
 
-        logger.info("=" * 65)
+            if parsed_result:
 
-        if not result_telegram_sent:
+                games_cache[
+                    parsed_result["game_number"]
+                ] = text
 
-            send_result_telegram(
-                signal_id,
-                prediction,
-                result,
-                entry_price,
-                exit_price,
-                entry_timestamp,
-                expiration_timestamp,
+                print(
+                    f"💾 КЭШ: "
+                    f"#{parsed_result['game_number']} "
+                    f"-> {parsed_result['cards']}",
+                    flush=True
+                )
+
+            # =========================================================
+            # 3. СОЗДАЁМ НОВЫЙ ПРОГНОЗ ПО ПАТТЕРНУ
+            # =========================================================
+
+            prediction = create_pattern_prediction(
+                completed_game
             )
 
-    conn.close()
+            if prediction:
+
+                message = make_prediction_message(
+                    prediction
+                )
+
+                prediction[
+                    "original_text"
+                ] = message
+
+                message_id = telegram_send(
+                    message
+                )
+
+                if message_id:
+
+                    prediction[
+                        "message_id"
+                    ] = message_id
+
+                    atomic_save_json(
+                        PREDICTIONS_FILE,
+                        predictions
+                    )
+
+                    print(
+                        f"📤 ПРОГНОЗ ОТПРАВЛЕН | "
+                        f"Источник #{prediction['source_number']} "
+                        f"-> Цель #{prediction['target_number']} | "
+                        f"{prediction['predicted_cards']}",
+                        flush=True
+                    )
+
+                else:
+
+                    print(
+                        "⚠️ Telegram не вернул message_id",
+                        flush=True
+                    )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Updates error: {e}",
+            flush=True
+        )
+
+    return offset
 
 
 # =====================================================================
-# STATISTICS
+# CHECK PREDICTIONS
+# СТАРАЯ ЛОГИКА ПРОВЕРКИ СОХРАНЕНА
 # =====================================================================
 
-def print_statistics():
+def check_predictions():
 
-    conn = sqlite3.connect(DB_FILE)
+    global predictions
 
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            COUNT(*),
-
-            SUM(
-                CASE
-                    WHEN result = 'WIN'
-                    THEN 1
-                    ELSE 0
-                END
-            ),
-
-            SUM(
-                CASE
-                    WHEN result = 'LOSE'
-                    THEN 1
-                    ELSE 0
-                END
-            )
-
-        FROM signals
-
-        WHERE checked = 1
-        """
-    )
-
-    row = cursor.fetchone()
-
-    conn.close()
-
-    total = row[0] or 0
-    wins = row[1] or 0
-    losses = row[2] or 0
-
-    accuracy = 0.0
-
-    if total > 0:
-
-        accuracy = (
-            wins / total * 100
-        )
-
-    logger.info("")
-    logger.info("=" * 65)
-    logger.info(
-        "📊 СТАТИСТИКА"
-    )
-    logger.info("=" * 65)
-
-    logger.info(
-        f"🎯 Всего: {total}"
-    )
-
-    logger.info(
-        f"✅ Зашло: {wins}"
-    )
-
-    logger.info(
-        f"❌ Не зашло: {losses}"
-    )
-
-    logger.info(
-        f"📈 Точность: "
-        f"{accuracy:.2f}%"
-    )
-
-    logger.info("=" * 65)
-
-
-# =====================================================================
-# PRINT ANALYSIS
-# =====================================================================
-
-def print_current_analysis(result):
-
-    if not result:
+    if not predictions:
         return
 
-    logger.info("")
-    logger.info("-" * 65)
+    if not CHANNEL_STATS:
+        return
 
-    logger.info(
-        f"💱 Актив: {ASSET_NAME}"
+    changed = False
+
+    pending_count = sum(
+        1
+        for entry in predictions
+        if entry.get("status") == "pending"
     )
 
-    logger.info(
-        f"🧩 Паттерн: "
-        f"{pattern_to_text(result.get('pattern', []))}"
-    )
+    if pending_count:
 
-    logger.info(
-        f"🔎 Всего совпадений: "
-        f"{result.get('matches', 0)}"
-    )
-
-    logger.info(
-        f"🟢 UP: "
-        f"{result.get('up', 0)} "
-        f"({result.get('up_probability', 0.0):.1f}%)"
-    )
-
-    logger.info(
-        f"🔴 DOWN: "
-        f"{result.get('down', 0)} "
-        f"({result.get('down_probability', 0.0):.1f}%)"
-    )
-
-    logger.info(
-        f"📊 Общая уверенность: "
-        f"{result.get('confidence', 0.0):.1f}%"
-    )
-
-    logger.info(
-        f"⚖️ Перевес: "
-        f"{result.get('advantage', 0.0):.1f}%"
-    )
-
-    logger.info(
-        f"🔥 Свежих совпадений: "
-        f"{result.get('recent_matches', 0)}"
-    )
-
-    logger.info(
-        f"🔥 Свежая уверенность: "
-        f"{result.get('recent_confidence', 0.0):.1f}%"
-    )
-
-    if result.get("prediction"):
-
-        logger.info(
-            f"🚨 СИГНАЛ ОДОБРЕН: "
-            f"{result.get('prediction')}"
+        print(
+            f"🔍 Проверяем прогнозы: "
+            f"{pending_count} pending | "
+            f"кэш игр: {len(games_cache)}",
+            flush=True
         )
 
-    else:
+    for entry in predictions:
 
-        logger.info(
-            "⏭️ Сигнал отклонён"
+        if entry.get("status") != "pending":
+            continue
+
+        target = entry.get("target_number")
+
+        predicted_cards = [
+            c for c in entry.get(
+                "predicted_cards",
+                []
+            )
+            if c
+        ]
+
+        msg_id = entry.get("message_id")
+
+        original_text = entry.get(
+            "original_text",
+            ""
         )
 
-    reason = result.get(
-        "reason",
-        "Причина не указана"
-    )
+        if not target:
+            continue
 
-    logger.info(
-        f"ℹ️ {reason}"
-    )
+        if not predicted_cards:
+            continue
 
-    logger.info("-" * 65)
+        # =============================================================
+        # ИЩЕМ КАРТУ:
+        #
+        # target
+        # target + 1
+        # target + 2
+        # target + 3
+        # target + 4
+        # =============================================================
+
+        found = None
+        all_available = True
+
+        for dogon in range(
+            DOGON_GAMES + 1
+        ):
+
+            num = add_game_offset(
+                target,
+                dogon
+            )
+
+            text = games_cache.get(num)
+
+            if not text:
+
+                all_available = False
+
+                continue
+
+            parsed = parse_cards_from_message(
+                text
+            )
+
+            if not parsed:
+                continue
+
+            actual_cards = parsed.get(
+                "cards",
+                []
+            )
+
+            for card in predicted_cards:
+
+                if card in actual_cards:
+
+                    found = {
+                        "num": num,
+                        "dogon": dogon,
+                        "card": card
+                    }
+
+                    break
+
+            if found:
+                break
+
+        # =============================================================
+        # WIN
+        # =============================================================
+
+        if found:
+
+            entry["status"] = "win"
+
+            entry["result_game"] = (
+                found["num"]
+            )
+
+            entry["found_card"] = (
+                found["card"]
+            )
+
+            entry["current_dogon"] = (
+                found["dogon"]
+            )
+
+            changed = True
+
+            print(
+                f"✅ ЗАШЛО | "
+                f"Источник #{entry.get('source_number')} | "
+                f"Цель #{target} | "
+                f"Результат #{found['num']} | "
+                f"Догон {found['dogon']} | "
+                f"{found['card']}",
+                flush=True
+            )
+
+            # Редактируем сообщение
+            if msg_id and original_text:
+
+                lines = original_text.split(
+                    "\n"
+                )
+
+                if lines:
+
+                    lines[0] = (
+                        f"🎯 Игра: #N{target} ✅"
+                    )
+
+                new_text = "\n".join(
+                    lines
+                )
+
+                telegram_edit(
+                    msg_id,
+                    new_text
+                )
+
+            atomic_save_json(
+                PREDICTIONS_FILE,
+                predictions
+            )
+
+            continue
+
+        # =============================================================
+        # ЖДЁМ ИГРЫ ДЛЯ ДОГОНОВ
+        # =============================================================
+
+        if not all_available:
+
+            print(
+                f"⏳ Ожидание результата "
+                f"для #{target}",
+                flush=True
+            )
+
+            continue
+
+        # =============================================================
+        # LOSE
+        # =============================================================
+
+        entry["status"] = "lose"
+
+        changed = True
+
+        print(
+            f"❌ НЕ ЗАШЛО | "
+            f"Источник #{entry.get('source_number')} | "
+            f"Цель #{target} | "
+            f"догоны 0-{DOGON_GAMES}",
+            flush=True
+        )
+
+        if msg_id and original_text:
+
+            lines = original_text.split(
+                "\n"
+            )
+
+            if lines:
+
+                lines[0] = (
+                    f"🎯 Игра: #N{target} ❌"
+                )
+
+            new_text = "\n".join(
+                lines
+            )
+
+            telegram_edit(
+                msg_id,
+                new_text
+            )
+
+        atomic_save_json(
+            PREDICTIONS_FILE,
+            predictions
+        )
+
+    if changed:
+
+        print(
+            "💾 Результаты прогнозов обновлены",
+            flush=True
+        )
 
 
 # =====================================================================
-# WAIT UNTIL SIGNAL WINDOW
+# CLEANUP PREDICTIONS
 # =====================================================================
 
-def is_signal_window():
+def cleanup_predictions():
 
-    now = time.time()
+    global predictions
 
-    seconds = now % 60
+    # Храним историю прогнозов
+    if len(predictions) > 5000:
 
-    # Анализируем ближе к новой минуте
-    return (
-        seconds
-        >= (
-            60
-            - SIGNAL_ADVANCE_SECONDS
+        predictions = predictions[-5000:]
+
+        atomic_save_json(
+            PREDICTIONS_FILE,
+            predictions
         )
-    )
 
 
 # =====================================================================
@@ -2286,279 +1435,149 @@ def is_signal_window():
 
 def main():
 
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info(
-        "🤖 BINARIUM AUTO ANALYZER"
-    )
-    logger.info("=" * 70)
+    global predictions
 
-    logger.info(
-        f"💱 Актив: {ASSET_NAME}"
+    print(
+        "\n"
+        "=================================================="
     )
 
-    logger.info(
-        f"🕯 Свечи: {DETAILIZATION}"
+    print(
+        "🚀 OLD PATTERN BOT — НОВАЯ ЛОГИКА"
     )
 
-    logger.info(
-        f"🧩 Паттерн: "
-        f"{PATTERN_LENGTH} свечей"
+    print(
+        "=================================================="
     )
 
-    logger.info(
-        f"🔎 Минимум совпадений: "
-        f"{MIN_MATCHES}"
+    print(
+        "📡 Источник: CHANNEL_STATS"
     )
 
-    logger.info(
-        f"📊 Мин. уверенность: "
-        f"{MIN_CONFIDENCE}%"
+    print(
+        "🧠 Паттерн: первая карта игрока J/Q/K/A"
     )
 
-    logger.info(
-        f"⚖️ Мин. перевес: "
-        f"{MIN_DIRECTION_ADVANTAGE}%"
+    print(
+        "🔄 Ранги: J↔K | Q↔A"
     )
 
-    logger.info(
-        f"🔥 Проверка последних: "
-        f"{RECENT_MATCHES_TO_CHECK}"
+    print(
+        "🔄 Масти: ♣↔♥ | ♠↔♦"
     )
 
-    logger.info(
-        f"⏱ Экспирация: "
-        f"{EXPIRATION_SECONDS} секунд"
+    print(
+        f"🎯 Смещение прогноза: +{FORECAST_OFFSET} игр"
     )
 
-    logger.info(
-        f"📨 Telegram: "
-        f"{'ВКЛ' if telegram_enabled() else 'ВЫКЛ'}"
+    print(
+        f"🚫 Исключения: "
+        f"{', '.join('#' + x for x in sorted(FORBIDDEN_TAGS))}"
     )
 
-    # -------------------------------------------------------------
-    # DATABASE
-    # -------------------------------------------------------------
-
-    init_database()
-
-    # -------------------------------------------------------------
-    # HISTORY
-    # -------------------------------------------------------------
-
-    download_history()
-
-    count, first_time, last_time = (
-        get_database_stats()
+    print(
+        f"🔁 Проверка: "
+        f"основная + {DOGON_GAMES} догонов"
     )
 
-    logger.info(
-        f"📚 Свечей в базе: {count}"
+    print(
+        "==================================================\n"
     )
 
-    logger.info(
-        f"🕐 Первая: {first_time}"
+    # ================================================================
+    # ЗАГРУЖАЕМ ПРОГНОЗЫ
+    # ================================================================
+
+    predictions = load_predictions()
+
+    print(
+        f"📊 Загружено прогнозов: "
+        f"{len(predictions)}",
+        flush=True
     )
 
-    logger.info(
-        f"🕐 Последняя: {last_time}"
+    print(
+        f"🛡️ Обработанных источников: "
+        f"{len(processed_source_games)}",
+        flush=True
     )
 
-    cycle = 0
+    # ================================================================
+    # TELEGRAM OFFSET
+    # ================================================================
 
-    last_analyzed_minute = None
+    offset = get_offset()
 
-    # -------------------------------------------------------------
-    # LOOP
-    # -------------------------------------------------------------
+    print(
+        f"📌 Telegram offset: {offset}",
+        flush=True
+    )
+
+    print(
+        "\n🤖 Бот запущен...\n",
+        flush=True
+    )
+
+    # ================================================================
+    # MAIN LOOP
+    # ================================================================
 
     while True:
 
-        cycle += 1
+        start = time.time()
 
         try:
 
-            # -----------------------------------------------------
-            # UPDATE DATA
-            # -----------------------------------------------------
+            # =========================================================
+            # 1. ЧИТАЕМ КАНАЛ
+            # =========================================================
 
-            update_recent_candles()
-
-            candles = (
-                load_candles_from_database()
+            offset = process_telegram_updates(
+                offset
             )
 
-            if not candles:
+            # =========================================================
+            # 2. ПРОВЕРЯЕМ РЕЗУЛЬТАТЫ
+            # =========================================================
 
-                time.sleep(
-                    UPDATE_INTERVAL
-                )
+            check_predictions()
 
-                continue
+            # =========================================================
+            # 3. ЧИСТИМ СТАРЫЕ ПРОГНОЗЫ
+            # =========================================================
 
-            # -----------------------------------------------------
-            # CHECK RESULTS ALWAYS
-            # -----------------------------------------------------
+            cleanup_predictions()
 
-            check_pending_signals(
-                candles
+            # =========================================================
+            # PAUSE
+            # =========================================================
+
+            elapsed = time.time() - start
+
+            sleep_time = max(
+                0.1,
+                POLL_INTERVAL - elapsed
             )
 
-            # -----------------------------------------------------
-            # MINIMUM DATA
-            # -----------------------------------------------------
-
-            closed_candles = (
-                get_closed_candles(
-                    candles
-                )
-            )
-
-            if (
-                len(closed_candles)
-                < MIN_CANDLES_FOR_ANALYSIS
-            ):
-
-                logger.info(
-                    "⏳ Недостаточно свечей"
-                )
-
-                time.sleep(
-                    UPDATE_INTERVAL
-                )
-
-                continue
-
-            # -----------------------------------------------------
-            # SIGNAL WINDOW
-            # -----------------------------------------------------
-
-            if not is_signal_window():
-
-                time.sleep(
-                    UPDATE_INTERVAL
-                )
-
-                continue
-
-            # -----------------------------------------------------
-            # CURRENT TARGET MINUTE
-            # -----------------------------------------------------
-
-            entry_timestamp = (
-                calculate_entry_time()
-            )
-
-            entry_minute = (
-                int(entry_timestamp)
-            )
-
-            # Уже анализировали эту минуту
-            if (
-                entry_minute
-                == last_analyzed_minute
-            ):
-
-                time.sleep(1)
-
-                continue
-
-            last_analyzed_minute = (
-                entry_minute
-            )
-
-            logger.info("")
-            logger.info("=" * 70)
-            logger.info(
-                "🔮 АНАЛИЗ ПЕРЕД ВХОДОМ"
-            )
-            logger.info("=" * 70)
-
-            logger.info(
-                f"⏰ Следующий вход: "
-                f"{timestamp_to_utc_string(entry_timestamp)}"
-            )
-
-            # -----------------------------------------------------
-            # ANALYZE
-            # -----------------------------------------------------
-
-            result = analyze_pattern(
-                candles
-            )
-
-            print_current_analysis(
-                result
-            )
-
-            if not result:
-
-                continue
-
-            if not result.get(
-                "prediction"
-            ):
-
-                continue
-
-            # -----------------------------------------------------
-            # SAVE SIGNAL
-            # -----------------------------------------------------
-
-            signal_candle = (
-                result.get(
-                    "signal_candle"
-                )
-            )
-
-            if not signal_candle:
-
-                continue
-
-            signal_data = save_signal(
-                result,
-                signal_candle,
-                entry_timestamp,
-            )
-
-            if not signal_data:
-
-                continue
-
-            # -----------------------------------------------------
-            # TELEGRAM
-            # -----------------------------------------------------
-
-            send_signal_telegram(
-                result,
-                signal_data,
-            )
-
-            # -----------------------------------------------------
-            # STATISTICS
-            # -----------------------------------------------------
-
-            if cycle % 20 == 0:
-
-                print_statistics()
-
-            time.sleep(1)
+            time.sleep(sleep_time)
 
         except KeyboardInterrupt:
 
-            logger.info(
-                "🛑 Остановка"
+            print(
+                "\n🛑 Бот остановлен",
+                flush=True
             )
 
             break
 
-        except Exception:
+        except Exception as e:
 
-            logger.exception(
-                "❌ Ошибка главного цикла"
+            print(
+                f"❌ Критическая ошибка: {e}",
+                flush=True
             )
 
-            time.sleep(5)
+            time.sleep(3)
 
 
 # =====================================================================
@@ -2566,25 +1585,4 @@ def main():
 # =====================================================================
 
 if __name__ == "__main__":
-
-    try:
-
-        main()
-
-    except KeyboardInterrupt:
-
-        print()
-        print(
-            "🛑 Бот остановлен."
-        )
-
-    except Exception:
-
-        print()
-        print(
-            "❌ КРИТИЧЕСКАЯ ОШИБКА:"
-        )
-
-        traceback.print_exc()
-
-        sys.exit(1)
+    main()
