@@ -47,14 +47,8 @@ if not CHANNEL_STATISTICS:
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-DATA_FILE = "twentyone_data_full.json"
-PREDICTIONS_FILE = "twentyone_predictions.json"
-TELEGRAM_UPDATES_FILE = "telegram_updates_offset.json"
-
-MAX_HISTORY_GAMES = 300
-MAX_PREDICTIONS = 1000
-
 DOGON_GAMES = 4
+MAX_PREDICTIONS = 1000
 
 BASE_URL = "https://1xlite-36553.pro"
 LEAGUE_ID = 1643503
@@ -82,7 +76,6 @@ SESSION.headers.update(HEADERS)
 # GLOBALS
 # ==================================================
 
-history_data = []
 predictions = []
 processed_games = set()
 active_games_cache = {}
@@ -91,8 +84,11 @@ statistics_games = {}
 
 
 # ==================================================
-# JSON
+# JSON (только для прогнозов)
 # ==================================================
+
+PREDICTIONS_FILE = "twentyone_predictions.json"
+
 
 def load_json_file(filename, default):
     try:
@@ -122,37 +118,20 @@ def atomic_save_json(filename, data):
         return False
 
 
-# ==================================================
-# LOAD DATA
-# ==================================================
-
-def load_history():
-    data = load_json_file(DATA_FILE, [])
-    if not isinstance(data, list):
-        return []
-    result = []
-    seen_ids = set()
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        game_id = str(item.get("game_id"))
-        if not game_id or game_id in seen_ids:
-            continue
-        seen_ids.add(game_id)
-        result.append(item)
-    result.sort(key=lambda x: int(x.get("game_number", 0)))
-    if len(result) > MAX_HISTORY_GAMES:
-        result = result[-MAX_HISTORY_GAMES:]
-    return result
-
-
 def load_predictions():
     data = load_json_file(PREDICTIONS_FILE, [])
     return data if isinstance(data, list) else []
 
 
+def save_predictions():
+    global predictions
+    if len(predictions) > MAX_PREDICTIONS:
+        predictions = predictions[-MAX_PREDICTIONS:]
+    atomic_save_json(PREDICTIONS_FILE, predictions)
+
+
 def load_telegram_offset():
-    data = load_json_file(TELEGRAM_UPDATES_FILE, {})
+    data = load_json_file("telegram_updates_offset.json", {})
     try:
         return int(data.get("offset", 0))
     except Exception:
@@ -160,7 +139,7 @@ def load_telegram_offset():
 
 
 def save_telegram_offset(offset):
-    atomic_save_json(TELEGRAM_UPDATES_FILE, {"offset": int(offset)})
+    atomic_save_json("telegram_updates_offset.json", {"offset": int(offset)})
 
 
 # ==================================================
@@ -194,7 +173,6 @@ def normalize_card_string(card):
 
 
 def get_opposite_suit(suit):
-    """Возвращает противоположную масть"""
     suit_map = {
         "♠": "♣",
         "♣": "♠",
@@ -425,27 +403,6 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
     return False
 
 
-def game_exists(game_id):
-    game_id = str(game_id)
-    return any(str(g.get("game_id")) == game_id for g in history_data)
-
-
-def save_new_game(game):
-    global history_data
-    if not game:
-        return None
-    game_id = str(game.get("game_id"))
-    if game_exists(game_id):
-        return None
-    history_data.append(game)
-    history_data.sort(key=lambda x: int(x.get("game_number", 0)))
-    if len(history_data) > MAX_HISTORY_GAMES:
-        history_data = history_data[-MAX_HISTORY_GAMES:]
-    atomic_save_json(DATA_FILE, history_data)
-    print(f"💾 Игра сохранена: #N{game['game_number']} | {game['player_cards']} vs {game['dealer_cards']}", flush=True)
-    return game
-
-
 # ==================================================
 # TRIGGER LOGIC
 # ==================================================
@@ -542,7 +499,6 @@ def telegram_edit(message_id, text):
 def make_prediction_message(entry):
     predicted_card = entry.get("predicted_card", "")
     
-    # Получаем противоположную масть
     card_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", predicted_card)
     if card_match:
         rank = card_match.group(1)
@@ -599,7 +555,7 @@ def create_trigger_predictions(game):
             entry["message_id"] = message_id
         predictions.append(entry)
         print(f"🔮 Прогноз: #N{entry['target_number']} -> {entry['predicted_card']}", flush=True)
-    atomic_save_json(PREDICTIONS_FILE, predictions)
+    save_predictions()
 
 
 # ==================================================
@@ -612,28 +568,23 @@ def parse_statistics_message(text):
     
     text = str(text).replace("\ufe0f", "")
     
-    # Ищем номер игры #N1180
     number_match = re.search(r"#N\s*(\d+)", text, re.IGNORECASE)
     if not number_match:
         return None
     
     game_number = int(number_match.group(1))
     
-    # Ищем все блоки с картами в скобках
-    # Формат: цифры(карты) или ✅цифры(карты)
     pattern = r"(?:✅)?\s*(\d+)\s*\(([^)]+)\)"
     matches = re.findall(pattern, text)
     
     if len(matches) < 2:
         return None
     
-    # Первый блок - игрок, второй - дилер
     player_score_str = matches[0][0]
     player_cards_str = matches[0][1]
     dealer_score_str = matches[1][0]
     dealer_cards_str = matches[1][1]
     
-    # Парсим карты игрока
     player_cards = []
     card_pattern = r"(10|[2-9AJQK])([♠♣♦♥])"
     
@@ -643,7 +594,6 @@ def parse_statistics_message(text):
         if rank and suit:
             player_cards.append(f"{rank}{suit}")
     
-    # Парсим карты дилера
     dealer_cards = []
     for rank, suit in re.findall(card_pattern, dealer_cards_str):
         rank = normalize_rank(rank)
@@ -724,7 +674,7 @@ def fetch_statistics_channel():
 
 
 # ==================================================
-# UPDATE PREDICTION STATUS (С ПРОТИВОПОЛОЖНОЙ МАСТЬЮ)
+# UPDATE PREDICTION STATUS
 # ==================================================
 
 def update_prediction_status(entry, success, found=None):
@@ -775,7 +725,6 @@ def check_predictions():
         if not target or not predicted_card:
             continue
         
-        # Получаем масть и ранг из прогноза
         card_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", predicted_card)
         if not card_match:
             continue
@@ -783,7 +732,6 @@ def check_predictions():
         predicted_rank = card_match.group(1)
         predicted_suit = card_match.group(2)
         
-        # Получаем противоположную масть
         opposite_suit = get_opposite_suit(predicted_suit)
         opposite_card = f"{predicted_rank}{opposite_suit}"
         
@@ -800,7 +748,6 @@ def check_predictions():
             
             actual_cards = game.get("player_cards", []) + game.get("dealer_cards", [])
             
-            # Проверяем ОБЕ масти: основную и противоположную
             if predicted_card in actual_cards or opposite_card in actual_cards:
                 found_card = predicted_card if predicted_card in actual_cards else opposite_card
                 found = {
@@ -835,7 +782,7 @@ def check_predictions():
         update_prediction_status(entry, False)
     
     if changed:
-        atomic_save_json(PREDICTIONS_FILE, predictions)
+        save_predictions()
 
 
 # ==================================================
@@ -873,9 +820,8 @@ def process_active_games():
             parsed.get("player_score", 0),
             parsed.get("dealer_score", 0)
         ):
-            saved = save_new_game(parsed)
-            if saved:
-                create_trigger_predictions(saved)
+            print(f"💾 Игра завершена: #N{parsed['game_number']} | {parsed['player_cards']} vs {parsed['dealer_cards']}", flush=True)
+            create_trigger_predictions(parsed)
             processed_games.add(game_id)
             active_games_cache.pop(game_id, None)
     for game_id in list(active_games_cache.keys()):
@@ -891,9 +837,8 @@ def process_active_games():
             parsed.get("player_score", 0),
             parsed.get("dealer_score", 0)
         ):
-            saved = save_new_game(parsed)
-            if saved:
-                create_trigger_predictions(saved)
+            print(f"💾 Игра завершена: #N{parsed['game_number']} | {parsed['player_cards']} vs {parsed['dealer_cards']}", flush=True)
+            create_trigger_predictions(parsed)
             processed_games.add(game_id)
             active_games_cache.pop(game_id, None)
 
@@ -906,7 +851,7 @@ def cleanup():
     global predictions, processed_games, statistics_games
     if len(predictions) > MAX_PREDICTIONS:
         predictions = predictions[-MAX_PREDICTIONS:]
-        atomic_save_json(PREDICTIONS_FILE, predictions)
+        save_predictions()
     if len(processed_games) > 2000:
         processed_games = set(list(processed_games)[-1000:])
     if len(statistics_games) > 500:
@@ -920,22 +865,16 @@ def cleanup():
 # ==================================================
 
 def main():
-    global history_data, predictions, telegram_update_offset
+    global predictions, telegram_update_offset
     
     print("🚀 БОТ ЗАПУЩЕН", flush=True)
     print(f"📊 Канал статистики: {CHANNEL_STATISTICS}", flush=True)
     print(f"🎯 Канал прогнозов: {CHANNEL_PROGNOZ}", flush=True)
     print("=" * 50, flush=True)
     
-    history_data = load_history()
     predictions = load_predictions()
     telegram_update_offset = load_telegram_offset()
     
-    for game in history_data:
-        if game.get("game_id"):
-            processed_games.add(str(game.get("game_id")))
-    
-    print(f"💾 Загружено игр: {len(history_data)}", flush=True)
     print(f"🔮 Загружено прогнозов: {len(predictions)}", flush=True)
     print("🤖 Бот работает...", flush=True)
     
