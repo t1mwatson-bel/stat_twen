@@ -1543,14 +1543,12 @@ def parse_statistics_message(text):
 # ==================================================
 
 def fetch_statistics_channel():
-
     global telegram_update_offset
     global statistics_games
 
     try:
-
         params = {
-            "timeout": 0,
+            "timeout": 30,  # Ждём новые сообщения 30 секунд
             "allowed_updates": json.dumps(
                 [
                     "channel_post",
@@ -1560,25 +1558,78 @@ def fetch_statistics_channel():
         }
 
         if telegram_update_offset > 0:
-
-            params["offset"] = (
-                telegram_update_offset
-            )
+            params["offset"] = telegram_update_offset
 
         response = SESSION.get(
             f"{TELEGRAM_API}/getUpdates",
             params=params,
-            timeout=10
+            timeout=35
         )
 
         data = response.json()
 
         if not data.get("ok"):
+            print(f"❌ getUpdates ошибка: {data}", flush=True)
+            return
 
-            print(
-                f"❌ getUpdates ошибка: {data}",
-                flush=True
-            )
+        updates = data.get("result", [])
+
+        if not updates:
+            # Сохраняем offset даже если пусто
+            save_telegram_offset(telegram_update_offset)
+            return
+
+        for update in updates:
+            try:
+                update_id = update.get("update_id")
+                if update_id is not None:
+                    telegram_update_offset = int(update_id) + 1
+
+                message = (
+                    update.get("channel_post")
+                    or update.get("edited_channel_post")
+                )
+
+                if not message:
+                    continue
+
+                chat = message.get("chat", {})
+                chat_id = str(chat.get("id", ""))
+
+                # Приводим к строке для сравнения
+                if chat_id != str(CHANNEL_STATISTICS):
+                    continue
+
+                text = (
+                    message.get("text")
+                    or message.get("caption")
+                )
+
+                if not text:
+                    continue
+
+                parsed = parse_statistics_message(text)
+
+                if not parsed:
+                    continue
+
+                game_number = parsed["game_number"]
+                statistics_games[int(game_number)] = parsed
+
+                print()
+                print("📊 ПОЛУЧЕНА ИГРА ИЗ КАНАЛА СТАТИСТИКИ", flush=True)
+                print(f"🎮 #N{game_number}", flush=True)
+                print(f"👤 Игрок: {parsed['player_cards']}", flush=True)
+                print(f"🎩 Дилер: {parsed['dealer_cards']}", flush=True)
+
+            except Exception as e:
+                print(f"⚠️ Ошибка обработки сообщения статистики: {e}", flush=True)
+
+        # Сохраняем offset после обработки
+        save_telegram_offset(telegram_update_offset)
+
+    except Exception as e:
+        print(f"❌ Ошибка чтения канала статистики: {e}", flush=True)
 
             return
 
