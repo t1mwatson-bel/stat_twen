@@ -560,7 +560,52 @@ def get_game_details(game_id):
             timeout=10
         )
 
-        return response.json()
+        print(
+            f"📡 GetGameZip #{game_id} | "
+            f"HTTP {response.status_code} | "
+            f"URL: {response.url}",
+            flush=True
+        )
+
+        if response.status_code != 200:
+
+            print(
+                f"❌ GetGameZip HTTP {response.status_code}: "
+                f"{response.text[:300]}",
+                flush=True
+            )
+
+            return None
+
+        text = response.text.strip()
+
+        if not text:
+
+            print(
+                f"❌ GetGameZip {game_id}: "
+                f"пустой ответ",
+                flush=True
+            )
+
+            return None
+
+        try:
+            return response.json()
+
+        except Exception:
+
+            print(
+                f"❌ GetGameZip {game_id}: "
+                f"сервер вернул НЕ JSON:",
+                flush=True
+            )
+
+            print(
+                text[:500],
+                flush=True
+            )
+
+            return None
 
     except Exception as e:
 
