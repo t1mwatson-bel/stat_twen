@@ -1217,22 +1217,6 @@ def make_prediction_message(entry):
 
         f"🃏 <b>{entry['predicted_card']}</b>\n\n"
 
-        f"🔥 Триггер: "
-        f"#N{entry['source_number']}\n"
-
-        f"👤 Первая карта игрока: "
-        f"{entry['source_player_card']}\n"
-
-        f"🎩 Первая карта дилера: "
-        f"{entry['source_dealer_card']}\n\n"
-
-        f"📌 Логика:\n"
-        f"Игрок → масть {entry['source_player_suit']}\n"
-        f"Дилер {entry['source_dealer_rank']} "
-        f"→ {entry['predicted_rank']}\n\n"
-
-        f"⏩ Смещение: "
-        f"+{entry['offset']} игр"
     )
 
 
