@@ -535,8 +535,25 @@ def telegram_edit(message_id, text):
         return False
 
 
+# ==================================================
+# MAKE PREDICTION MESSAGE (С ДВУМЯ МАСТЯМИ)
+# ==================================================
+
 def make_prediction_message(entry):
-    return f"🎯 <b>Игра: #N{entry['target_number']}</b>\n\n🃏 <b>{entry['predicted_card']}</b>"
+    predicted_card = entry.get("predicted_card", "")
+    
+    # Получаем противоположную масть
+    card_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", predicted_card)
+    if card_match:
+        rank = card_match.group(1)
+        suit = card_match.group(2)
+        opposite_suit = get_opposite_suit(suit)
+        opposite_card = f"{rank}{opposite_suit}"
+        display_cards = f"{predicted_card} / {opposite_card}"
+    else:
+        display_cards = predicted_card
+    
+    return f"🎯 <b>Игра: #N{entry['target_number']}</b>\n\n🃏 <b>{display_cards}</b>"
 
 
 def create_trigger_predictions(game):
@@ -586,7 +603,7 @@ def create_trigger_predictions(game):
 
 
 # ==================================================
-# PARSE STATISTICS CHANNEL (НОВЫЙ ПАРСЕР)
+# PARSE STATISTICS CHANNEL
 # ==================================================
 
 def parse_statistics_message(text):
@@ -707,7 +724,7 @@ def fetch_statistics_channel():
 
 
 # ==================================================
-# CHECK PREDICTIONS (С ПРОТИВОПОЛОЖНОЙ МАСТЬЮ)
+# UPDATE PREDICTION STATUS (С ПРОТИВОПОЛОЖНОЙ МАСТЬЮ)
 # ==================================================
 
 def update_prediction_status(entry, success, found=None):
@@ -721,10 +738,17 @@ def update_prediction_status(entry, success, found=None):
     
     if success:
         lines[0] = f"🎯 <b>Игра: #N{target} ✅</b>"
-        lines.append("")
-        lines.append(f"✅ ЗАШЛО: #N{found['num']}")
-        lines.append(f"🃏 Выпало: {found['card']}")
-        lines.append(f"🔁 Догон: {found['dogon']}")
+        if found and found.get("is_opposite"):
+            lines.append("")
+            lines.append(f"✅ ЗАШЛО: #N{found['num']}")
+            lines.append(f"🃏 Выпало: {found['card']} 🔄")
+            lines.append(f"🔁 Догон: {found['dogon']}")
+            lines.append("⚡ Противоположная масть")
+        else:
+            lines.append("")
+            lines.append(f"✅ ЗАШЛО: #N{found['num']}")
+            lines.append(f"🃏 Выпало: {found['card']}")
+            lines.append(f"🔁 Догон: {found['dogon']}")
     else:
         lines[0] = f"🎯 <b>Игра: #N{target} ❌</b>"
         lines.append("")
@@ -732,6 +756,10 @@ def update_prediction_status(entry, success, found=None):
     
     telegram_edit(message_id, "\n".join(lines))
 
+
+# ==================================================
+# CHECK PREDICTIONS (С ПРОТИВОПОЛОЖНОЙ МАСТЬЮ)
+# ==================================================
 
 def check_predictions():
     global predictions
