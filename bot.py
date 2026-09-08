@@ -48,7 +48,7 @@ PREDICTION_OFFSET = 11
 DOGON_GAMES = 4
 
 # API
-BASE_URL = "https://1xlite-0687.pro"
+BASE_URL = "https://1xlite-36553.pro"
 
 BACCARAT_LEAGUE_ID = 2050671
 
