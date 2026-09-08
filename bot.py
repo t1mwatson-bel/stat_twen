@@ -1,12 +1,13 @@
+```python
 import os
 import sys
 import json
 import time
 import requests
-import pytz
 import re
+from datetime import datetime, timedelta
 
-from datetime import datetime
+import pytz
 
 
 # ==================================================
@@ -36,72 +37,23 @@ if not CHANNEL_PROGNOZ:
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-# ФАЙЛЫ
 DATA_FILE = "twentyone_data_full.json"
 PREDICTIONS_FILE = "twentyone_predictions.json"
 
-# Храним только последние 100 игр
-MAX_HISTORY_GAMES = 100
+MAX_HISTORY_GAMES = 300
+MAX_PREDICTIONS = 1000
 
-# ПРОГНОЗ
-PREDICTION_OFFSET = 11
+# Проверяем целевую игру + ещё 4 игры догона
 DOGON_GAMES = 4
 
-# API
-BASE_URL = "https://1xlite-36553.pro"
+# РАБОЧИЙ API
+BASE_URL = "https://1xlite-0687.pro"
 
-BACCARAT_LEAGUE_ID = 2050671
-
-GAMES_URL = (
-    f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
-    "?cfView=3"
-    "&count=40"
-    "&fcountry=190"
-    "&gr=415"
-    "&grMode=4"
-    "&lng=ru"
-    "&ref=7"
-    "&selectedMs=1.146.1643503,10.146.1643503"
-)
-
-GAME_URL = (
-    f"{BASE_URL}/LiveFeed/GetGameZip"
-)
+LEAGUE_ID = 1643503
 
 POLL_INTERVAL = 2.0
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-
-# ==================================================
-# ЦЕЛЕВЫЕ РАНГИ
-# ==================================================
-
-SOURCE_RANKS = {"J", "Q", "K", "A"}
-
-
-# ==================================================
-# ЗЕРКАЛЬНЫЕ РАНГИ
-# ==================================================
-
-RANK_MIRROR = {
-    "J": "K",
-    "K": "J",
-    "Q": "A",
-    "A": "Q"
-}
-
-
-# ==================================================
-# ЗЕРКАЛЬНЫЕ МАСТИ
-# ==================================================
-
-SUIT_MIRROR = {
-    "♣": "♥",
-    "♥": "♣",
-    "♠": "♦",
-    "♦": "♠"
-}
 
 
 # ==================================================
@@ -110,11 +62,18 @@ SUIT_MIRROR = {
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*"
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Origin": BASE_URL,
+    "Referer": (
+        f"{BASE_URL}/ru/live/twentyone/"
+        "1643503-twentyone-game"
+    ),
+    "Connection": "keep-alive"
 }
 
 SESSION = requests.Session()
@@ -128,8 +87,9 @@ SESSION.headers.update(HEADERS)
 history_data = []
 predictions = []
 
-last_seen_game_ids = set()
-last_prediction_time = 0
+processed_games = set()
+
+active_games_cache = {}
 
 
 # ==================================================
@@ -137,12 +97,17 @@ last_prediction_time = 0
 # ==================================================
 
 def load_json_file(filename, default):
+
     try:
 
         if not os.path.exists(filename):
             return default
 
-        with open(filename, "r", encoding="utf-8") as f:
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as f:
             return json.load(f)
 
     except Exception as e:
@@ -161,7 +126,11 @@ def atomic_save_json(filename, data):
 
     try:
 
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(
+            tmp,
+            "w",
+            encoding="utf-8"
+        ) as f:
 
             json.dump(
                 data,
@@ -177,7 +146,8 @@ def atomic_save_json(filename, data):
     except Exception as e:
 
         print(
-            f"⚠️ Ошибка сохранения {filename}: {e}",
+            f"⚠️ Ошибка сохранения "
+            f"{filename}: {e}",
             flush=True
         )
 
@@ -206,28 +176,37 @@ def load_history():
     if not isinstance(data, list):
         return []
 
-    cleaned = []
+    result = []
+    seen_ids = set()
 
     for item in data:
 
         if not isinstance(item, dict):
             continue
 
-        if not item.get("game_id"):
+        game_id = item.get("game_id")
+
+        if not game_id:
             continue
 
-        cleaned.append(item)
+        game_id = str(game_id)
 
-    cleaned.sort(
+        if game_id in seen_ids:
+            continue
+
+        seen_ids.add(game_id)
+        result.append(item)
+
+    result.sort(
         key=lambda x: int(
             x.get("game_number", 0)
         )
     )
 
-    if len(cleaned) > MAX_HISTORY_GAMES:
-        cleaned = cleaned[-MAX_HISTORY_GAMES:]
+    if len(result) > MAX_HISTORY_GAMES:
+        result = result[-MAX_HISTORY_GAMES:]
 
-    return cleaned
+    return result
 
 
 # ==================================================
@@ -248,12 +227,12 @@ def load_predictions():
 
 
 # ==================================================
-# NORMALIZE
+# NORMALIZE CARD
 # ==================================================
 
 def normalize_suit(suit):
 
-    if not suit:
+    if suit is None:
         return None
 
     suit = str(suit)
@@ -275,15 +254,12 @@ def normalize_suit(suit):
 
 def normalize_rank(rank):
 
-    if not rank:
+    if rank is None:
         return None
 
-    rank = str(rank).upper().strip()
+    rank = str(rank).strip().upper()
 
-    rank = rank.replace(
-        "А",
-        "A"
-    )
+    rank = rank.replace("А", "A")
 
     allowed = {
         "2", "3", "4", "5",
@@ -297,57 +273,863 @@ def normalize_rank(rank):
     return None
 
 
-def normalize_card(rank, suit):
+def normalize_card_string(card):
 
-    rank = normalize_rank(rank)
-    suit = normalize_suit(suit)
+    if not card:
+        return None
+
+    card = str(card)
+
+    card = card.replace(
+        "\ufe0f",
+        ""
+    )
+
+    match = re.match(
+        r"(10|[2-9AJQKА])([♠♣♦♥])",
+        card
+    )
+
+    if not match:
+        return None
+
+    rank = normalize_rank(
+        match.group(1)
+    )
+
+    suit = normalize_suit(
+        match.group(2)
+    )
 
     if not rank or not suit:
         return None
 
-    return f"{rank}{suit}\ufe0f"
+    return f"{rank}{suit}"
 
 
 # ==================================================
-# GAME NUMBER
+# GAME NUMBER FALLBACK
 # ==================================================
 
-def get_next_game_number():
+def get_game_number_fallback():
+
+    now = datetime.now(MOSCOW_TZ)
+
+    start = now.replace(
+        hour=3,
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+
+    if now < start:
+        start -= timedelta(days=1)
+
+    diff_minutes = (
+        now - start
+    ).total_seconds() / 60
+
+    return int(diff_minutes) % 1440 + 1
+
+
+# ==================================================
+# GET ACTIVE GAMES
+# ==================================================
+
+def get_active_games():
+
+    try:
+
+        url = (
+            f"{BASE_URL}"
+            "/service-api/main-live-feed/v3/games1x2"
+        )
+
+        params = {
+            "cfView": "3",
+            "count": "40",
+            "fcountry": "190",
+            "gr": "415",
+            "grMode": "4",
+            "lng": "ru",
+            "ref": "7",
+            "selectedMs": "10.146.1643503"
+        }
+
+        response = SESSION.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+
+            print(
+                f"⚠️ games1x2 HTTP "
+                f"{response.status_code}",
+                flush=True
+            )
+
+            return []
+
+        try:
+            data = response.json()
+        except Exception:
+
+            print(
+                f"⚠️ games1x2 вернул не JSON: "
+                f"{response.text[:200]}",
+                flush=True
+            )
+
+            return []
+
+        if isinstance(data, list):
+
+            games = data
+
+        elif (
+            isinstance(data, dict)
+            and isinstance(
+                data.get("Value"),
+                list
+            )
+        ):
+
+            games = data.get("Value", [])
+
+        else:
+
+            return []
+
+        result = []
+
+        for game in games:
+
+            if not isinstance(game, dict):
+                continue
+
+            league = game.get(
+                "liga",
+                {}
+            )
+
+            league_id = None
+
+            if isinstance(league, dict):
+                league_id = league.get("id")
+
+            try:
+                league_id = int(league_id)
+            except Exception:
+                pass
+
+            if league_id != LEAGUE_ID:
+                continue
+
+            game_id = game.get("id")
+
+            if not game_id:
+                continue
+
+            result.append(game)
+
+        return result
+
+    except Exception as e:
+
+        print(
+            f"❌ Ошибка получения игр: {e}",
+            flush=True
+        )
+
+        return []
+
+
+# ==================================================
+# GET GAME DATA
+# ==================================================
+
+def get_game_data(game_id):
+
+    url = (
+        f"{BASE_URL}"
+        "/service-api/LiveFeed/GetGameZip"
+    )
+
+    params = {
+        "id": str(game_id),
+        "isSubGames": "true",
+        "GroupEvents": "true",
+        "countevents": "250",
+        "grMode": "4",
+        "partner": "7",
+        "topGroups": "",
+        "country": "190",
+        "marketType": "1",
+        "isNewBuilder": "true"
+    }
+
+    try:
+
+        response = SESSION.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        if response.status_code != 200:
+
+            print(
+                f"⚠️ GetGameZip HTTP "
+                f"{response.status_code} "
+                f"для {game_id}",
+                flush=True
+            )
+
+            return None
+
+        try:
+
+            data = response.json()
+
+        except Exception as e:
+
+            print(
+                f"⚠️ GetGameZip JSON ошибка "
+                f"{game_id}: {e}",
+                flush=True
+            )
+
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        return data
+
+    except Exception as e:
+
+        print(
+            f"❌ Ошибка игры "
+            f"{game_id}: {e}",
+            flush=True
+        )
+
+        return None
+
+
+# ==================================================
+# PARSE CARDS
+# ==================================================
+
+def get_cards(value_str):
+
+    if not value_str:
+        return []
+
+    if value_str == "[]":
+        return []
+
+    try:
+
+        if isinstance(value_str, str):
+
+            cards = json.loads(
+                value_str
+            )
+
+        elif isinstance(value_str, list):
+
+            cards = value_str
+
+        else:
+
+            return []
+
+        result = []
+
+        suit_map = {
+            0: "♠",
+            1: "♣",
+            2: "♦",
+            3: "♥"
+        }
+
+        rank_map = {
+            "1": "A",
+            "2": "2",
+            "3": "3",
+            "4": "4",
+            "5": "5",
+            "6": "6",
+            "7": "7",
+            "8": "8",
+            "9": "9",
+            "10": "10",
+            "11": "J",
+            "12": "Q",
+            "13": "K",
+            "14": "A"
+        }
+
+        for card in cards:
+
+            if not isinstance(card, dict):
+                continue
+
+            cs = card.get("CS")
+            cv = card.get("CV")
+
+            try:
+                cv = int(cv)
+            except Exception:
+                pass
+
+            rank = rank_map.get(
+                str(cv),
+                str(cv)
+            )
+
+            suit = suit_map.get(cs)
+
+            if not rank or not suit:
+                continue
+
+            result.append(
+                f"{rank}{suit}"
+            )
+
+        return result
+
+    except Exception:
+
+        return []
+
+
+# ==================================================
+# CALCULATE SCORE
+# ==================================================
+
+def calculate_score(cards):
+
+    if not cards:
+        return 0
+
+    if (
+        len(cards) == 2
+        and all(
+            card.startswith("A")
+            for card in cards
+        )
+    ):
+        return 21
+
+    score = 0
+
+    for card in cards:
+
+        if not card:
+            continue
+
+        card = str(card)
+
+        if card.startswith("10"):
+            score += 10
+
+        elif card.startswith("2"):
+            score += 2
+
+        elif card.startswith("3"):
+            score += 3
+
+        elif card.startswith("4"):
+            score += 4
+
+        elif card.startswith("5"):
+            score += 5
+
+        elif card.startswith("6"):
+            score += 6
+
+        elif card.startswith("7"):
+            score += 7
+
+        elif card.startswith("8"):
+            score += 8
+
+        elif card.startswith("9"):
+            score += 9
+
+        elif card.startswith("J"):
+            score += 2
+
+        elif card.startswith("Q"):
+            score += 3
+
+        elif card.startswith("K"):
+            score += 4
+
+        elif card.startswith("A"):
+            score += 11
+
+    return score
+
+
+# ==================================================
+# PARSE API GAME
+# ==================================================
+
+def parse_api_game(game_id, data):
+
+    if not isinstance(data, dict):
+        return None
+
+    value = data.get("Value")
+
+    if not isinstance(value, dict):
+        return None
+
+    sc = value.get(
+        "SC",
+        {}
+    )
+
+    if not isinstance(sc, dict):
+        return None
+
+    player_cards = []
+    dealer_cards = []
+    state = None
+
+    for item in sc.get("S", []):
+
+        if not isinstance(item, dict):
+            continue
+
+        key = item.get("Key")
+
+        item_value = item.get(
+            "Value",
+            "[]"
+        )
+
+        if key == "P1":
+
+            player_cards = get_cards(
+                item_value
+            )
+
+        elif key == "P2":
+
+            dealer_cards = get_cards(
+                item_value
+            )
+
+        elif key == "STATE":
+
+            state = str(item_value)
+
+    # Нам обязательно нужна первая карта
+    # и игрока и дилера
+    if not player_cards:
+        return None
+
+    if not dealer_cards:
+        return None
+
+    raw_game_num = (
+        value.get("DI")
+        or value.get("TN")
+    )
+
+    if raw_game_num:
+
+        match = re.search(
+            r"\d+",
+            str(raw_game_num)
+        )
+
+        if match:
+
+            game_number = int(
+                match.group()
+            )
+
+        else:
+
+            game_number = (
+                get_game_number_fallback()
+            )
+
+    else:
+
+        game_number = (
+            get_game_number_fallback()
+        )
+
+    player_score = calculate_score(
+        player_cards
+    )
+
+    dealer_score = calculate_score(
+        dealer_cards
+    )
+
+    return {
+        "game_id": str(game_id),
+
+        "game_number": game_number,
+
+        "player_cards": player_cards,
+
+        "dealer_cards": dealer_cards,
+
+        "player_score": player_score,
+
+        "dealer_score": dealer_score,
+
+        "state": state,
+
+        "updated_at": datetime.now(
+            MOSCOW_TZ
+        ).isoformat()
+    }
+
+
+# ==================================================
+# GAME FINISHED
+# ==================================================
+
+def is_game_finished(
+    state,
+    player_cards,
+    dealer_cards,
+    p_score,
+    d_score
+):
+
+    if (
+        len(player_cards) == 2
+        and p_score == 21
+    ):
+        return True
+
+    if (
+        dealer_cards
+        and len(dealer_cards) == 2
+        and d_score == 21
+    ):
+        return True
+
+    if state == "5":
+        return True
+
+    if state == "4":
+
+        if p_score == 21:
+            return True
+
+        if (
+            dealer_cards
+            and d_score in (20, 21)
+        ):
+            return True
+
+        return False
+
+    if p_score > 21:
+        return True
+
+    if dealer_cards and d_score > 21:
+        return True
+
+    if len(player_cards) >= 5:
+        return True
+
+    if (
+        dealer_cards
+        and len(dealer_cards) >= 5
+    ):
+        return True
+
+    return False
+
+
+# ==================================================
+# GAME EXISTS
+# ==================================================
+
+def game_exists(game_id):
+
+    game_id = str(game_id)
+
+    for game in history_data:
+
+        if str(
+            game.get("game_id")
+        ) == game_id:
+
+            return True
+
+    return False
+
+
+# ==================================================
+# SAVE GAME
+# ==================================================
+
+def save_new_game(game):
 
     global history_data
 
-    if not history_data:
-        return 1
+    if not game:
+        return None
 
-    numbers = []
+    game_id = str(
+        game.get("game_id")
+    )
 
-    for item in history_data:
+    if game_exists(game_id):
+        return None
 
-        try:
-            numbers.append(
-                int(item.get("game_number", 0))
-            )
+    history_data.append(game)
 
-        except Exception:
-            pass
+    history_data.sort(
+        key=lambda x: int(
+            x.get("game_number", 0)
+        )
+    )
 
-    if not numbers:
-        return 1
+    if len(history_data) > MAX_HISTORY_GAMES:
 
-    return max(numbers) + 1
+        history_data = history_data[
+            -MAX_HISTORY_GAMES:
+        ]
+
+    atomic_save_json(
+        DATA_FILE,
+        history_data
+    )
+
+    print()
+    print(
+        "══════════════════════════════════",
+        flush=True
+    )
+    print(
+        "💾 ИГРА СОХРАНЕНА",
+        flush=True
+    )
+    print(
+        f"🎮 #N{game['game_number']}",
+        flush=True
+    )
+    print(
+        f"🆔 {game_id}",
+        flush=True
+    )
+    print(
+        f"👤 Игрок: "
+        f"{game['player_score']} "
+        f"{game['player_cards']}",
+        flush=True
+    )
+    print(
+        f"🎩 Дилер: "
+        f"{game['dealer_score']} "
+        f"{game['dealer_cards']}",
+        flush=True
+    )
+    print(
+        "══════════════════════════════════",
+        flush=True
+    )
+
+    return game
 
 
 # ==================================================
-# ADD GAME OFFSET
+# BUILD TRIGGER PREDICTION
+#
+# НОВАЯ ЛОГИКА:
+#
+# Количество карт НЕ важно.
+#
+# Первая карта игрока -> МАСТЬ
+#
+# Первая карта дилера:
+#
+# 6 -> J
+# 7 -> Q
+# 8 -> K
+# 9 -> A
+#
+# ЦЕЛЬ:
+#
+# Номер игры + цифра дилера
+#
+# Пример:
+#
+# #N765
+#
+# Игрок первая: 8♠
+# Дилер первая: 6♣
+#
+# Масть = ♠
+# 6 -> J
+#
+# Прогноз = J♠
+#
+# Цель:
+# 765 + 6 = #N771
 # ==================================================
 
-def add_game_offset(number, offset):
+def build_trigger_predictions(game):
+
+    if not game:
+        return []
+
+    player_cards = game.get(
+        "player_cards",
+        []
+    )
+
+    dealer_cards = game.get(
+        "dealer_cards",
+        []
+    )
+
+    # Количество карт НЕ важно.
+    # Главное чтобы была хотя бы первая карта.
+    if not player_cards:
+        return []
+
+    if not dealer_cards:
+        return []
+
+    player_first = normalize_card_string(
+        player_cards[0]
+    )
+
+    dealer_first = normalize_card_string(
+        dealer_cards[0]
+    )
+
+    if not player_first:
+        return []
+
+    if not dealer_first:
+        return []
+
+    player_match = re.match(
+        r"(10|[2-9AJQK])([♠♣♦♥])",
+        player_first
+    )
+
+    dealer_match = re.match(
+        r"(10|[2-9AJQK])([♠♣♦♥])",
+        dealer_first
+    )
+
+    if not player_match:
+        return []
+
+    if not dealer_match:
+        return []
+
+    # ----------------------------------------------
+    # Игрок -> только масть
+    # ----------------------------------------------
+
+    source_suit = player_match.group(2)
+
+    # ----------------------------------------------
+    # Дилер -> цифра
+    # ----------------------------------------------
+
+    dealer_rank = dealer_match.group(1)
+
+    rank_mapping = {
+        "6": "J",
+        "7": "Q",
+        "8": "K",
+        "9": "A"
+    }
+
+    # Триггер работает ТОЛЬКО
+    # если первая карта дилера 6/7/8/9
+    if dealer_rank not in rank_mapping:
+        return []
+
+    predicted_rank = rank_mapping[
+        dealer_rank
+    ]
+
+    predicted_card = (
+        f"{predicted_rank}{source_suit}"
+    )
+
+    offset = int(dealer_rank)
 
     try:
-        return int(number) + int(offset)
+
+        source_number = int(
+            game.get("game_number")
+        )
 
     except Exception:
-        return None
+
+        return []
+
+    target_number = (
+        source_number + offset
+    )
+
+    return [{
+        "prediction_type": "dealer_digit",
+
+        "offset": offset,
+
+        "target_number": target_number,
+
+        "predicted_card": predicted_card
+    }]
+
+
+# ==================================================
+# PREDICTION EXISTS
+# ==================================================
+
+def prediction_exists(
+    source_game_id,
+    target_number
+):
+
+    for entry in predictions:
+
+        try:
+
+            if (
+                str(
+                    entry.get(
+                        "source_game_id"
+                    )
+                ) == str(source_game_id)
+                and int(
+                    entry.get(
+                        "target_number",
+                        0
+                    )
+                ) == int(target_number)
+            ):
+
+                return True
+
+        except Exception:
+            continue
+
+    return False
 
 
 # ==================================================
@@ -416,14 +1198,9 @@ def telegram_edit(message_id, text):
 
         data = response.json()
 
-        if not data.get("ok"):
-
-            print(
-                f"⚠️ Telegram edit: {data}",
-                flush=True
-            )
-
-        return bool(data.get("ok"))
+        return bool(
+            data.get("ok")
+        )
 
     except Exception as e:
 
@@ -436,1032 +1213,203 @@ def telegram_edit(message_id, text):
 
 
 # ==================================================
-# GET LIVE GAMES
-# ==================================================
-
-def get_live_games():
-
-    try:
-
-        response = SESSION.get(
-            GAMES_URL,
-            timeout=10
-        )
-
-        data = response.json()
-
-        games = []
-
-        if isinstance(data, dict):
-
-            for key in [
-                "Value",
-                "value",
-                "Games",
-                "games",
-                "Items",
-                "items"
-            ]:
-
-                value = data.get(key)
-
-                if isinstance(value, list):
-                    games = value
-                    break
-
-        elif isinstance(data, list):
-            games = data
-
-        return games
-
-    except Exception as e:
-
-        print(
-            f"❌ Ошибка получения списка игр: {e}",
-            flush=True
-        )
-
-        return []
-
-
-# ==================================================
-# EXTRACT GAME ID
-# ==================================================
-
-def extract_game_id(game):
-
-    possible_keys = [
-        "I",
-        "id",
-        "ID",
-        "gameId",
-        "GameId"
-    ]
-
-    for key in possible_keys:
-
-        value = game.get(key)
-
-        if value is not None:
-            return str(value)
-
-    return None
-
-
-# ==================================================
-# EXTRACT LEAGUE
-# ==================================================
-
-def extract_league_id(game):
-
-    possible_keys = [
-        "LI",
-        "leagueId",
-        "LeagueId",
-        "L"
-    ]
-
-    for key in possible_keys:
-
-        value = game.get(key)
-
-        if value is not None:
-
-            try:
-                return int(value)
-            except Exception:
-                pass
-
-    return None
-
-
-# ==================================================
-# GET GAME DETAILS
-# ==================================================
-
-def get_game_details(game_id):
-
-    try:
-
-        response = SESSION.get(
-            GAME_URL,
-            params={
-                "id": game_id,
-                "isSubGames": "true",
-                "GroupEvents": "true",
-                "countevents": 250,
-                "grMode": 4,
-                "partner": 7,
-                "topGroups": "",
-                "country": 190,
-                "marketType": 1,
-                "isNewBuilder": "true"
-            },
-            timeout=10
-        )
-
-        print(
-            f"📡 GetGameZip #{game_id} | "
-            f"HTTP {response.status_code} | "
-            f"URL: {response.url}",
-            flush=True
-        )
-
-        if response.status_code != 200:
-
-            print(
-                f"❌ GetGameZip HTTP {response.status_code}: "
-                f"{response.text[:300]}",
-                flush=True
-            )
-
-            return None
-
-        text = response.text.strip()
-
-        if not text:
-
-            print(
-                f"❌ GetGameZip {game_id}: "
-                f"пустой ответ",
-                flush=True
-            )
-
-            return None
-
-        try:
-            return response.json()
-
-        except Exception:
-
-            print(
-                f"❌ GetGameZip {game_id}: "
-                f"сервер вернул НЕ JSON:",
-                flush=True
-            )
-
-            print(
-                text[:500],
-                flush=True
-            )
-
-            return None
-
-    except Exception as e:
-
-        print(
-            f"❌ Ошибка GetGameZip {game_id}: {e}",
-            flush=True
-        )
-
-        return None
-
-
-# ==================================================
-# FIND CARDS RECURSIVELY
-# ==================================================
-
-def find_cards_recursive(obj, found=None):
-
-    if found is None:
-        found = []
-
-    if isinstance(obj, dict):
-
-        rank = None
-        suit = None
-
-        for key in [
-            "rank",
-            "Rank",
-            "R"
-        ]:
-
-            if key in obj:
-                rank = obj[key]
-                break
-
-        for key in [
-            "suit",
-            "Suit",
-            "S"
-        ]:
-
-            if key in obj:
-                suit = obj[key]
-                break
-
-        if rank and suit:
-
-            card = normalize_card(
-                rank,
-                suit
-            )
-
-            if card:
-                found.append(card)
-
-        for value in obj.values():
-            find_cards_recursive(
-                value,
-                found
-            )
-
-    elif isinstance(obj, list):
-
-        for item in obj:
-            find_cards_recursive(
-                item,
-                found
-            )
-
-    return found
-
-
-# ==================================================
-# PARSE CARD STRING
-# ==================================================
-
-def parse_cards_from_string(text):
-
-    if not text:
-        return []
-
-    text = str(text)
-
-    cards = re.findall(
-        r"(10|[2-9AJQK])([♠♣♦♥])",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    result = []
-
-    for rank, suit in cards:
-
-        card = normalize_card(
-            rank,
-            suit
-        )
-
-        if card:
-            result.append(card)
-
-    return result
-
-
-# ==================================================
-# EXTRACT SCORE
-# ==================================================
-
-def extract_score(obj):
-
-    if isinstance(obj, (int, float)):
-        return int(obj)
-
-    if isinstance(obj, str):
-
-        match = re.search(
-            r"\b(\d{1,2})\b",
-            obj
-        )
-
-        if match:
-            return int(match.group(1))
-
-    return None
-
-
-# ==================================================
-# PARSE GAME DATA
-#
-# Поддерживает структуру старого API,
-# где P1/P2 содержат данные игрока/дилера
-# ==================================================
-
-def parse_api_game(game_id, raw_data):
-
-    if not raw_data:
-        return None
-
-    data = raw_data
-
-    # Иногда ответ лежит внутри Value
-    if isinstance(data, dict):
-
-        for key in ["Value", "value"]:
-
-            if isinstance(data.get(key), dict):
-                data = data[key]
-                break
-
-    if not isinstance(data, dict):
-        return None
-
-    player_cards = []
-    dealer_cards = []
-
-    player_score = None
-    dealer_score = None
-
-    # ----------------------------------------------
-    # ИЩЕМ P1 / P2
-    # ----------------------------------------------
-
-    p1 = None
-    p2 = None
-
-    def find_p1_p2(obj):
-
-        nonlocal p1
-        nonlocal p2
-
-        if isinstance(obj, dict):
-
-            if p1 is None and "P1" in obj:
-                p1 = obj.get("P1")
-
-            if p2 is None and "P2" in obj:
-                p2 = obj.get("P2")
-
-            for value in obj.values():
-                find_p1_p2(value)
-
-        elif isinstance(obj, list):
-
-            for item in obj:
-                find_p1_p2(item)
-
-    find_p1_p2(data)
-
-    # ----------------------------------------------
-    # ПАРСИМ P1
-    # ----------------------------------------------
-
-    if p1 is not None:
-
-        if isinstance(p1, str):
-
-            player_cards = parse_cards_from_string(
-                p1
-            )
-
-        elif isinstance(p1, dict):
-
-            for key in [
-                "cards",
-                "Cards",
-                "C",
-                "SC",
-                "S"
-            ]:
-
-                value = p1.get(key)
-
-                if value:
-
-                    if isinstance(value, str):
-                        player_cards.extend(
-                            parse_cards_from_string(
-                                value
-                            )
-                        )
-                    else:
-                        player_cards.extend(
-                            find_cards_recursive(
-                                value
-                            )
-                        )
-
-            for key in [
-                "score",
-                "Score",
-                "points",
-                "Points",
-                "value",
-                "V"
-            ]:
-
-                if key in p1:
-
-                    score = extract_score(
-                        p1[key]
-                    )
-
-                    if score is not None:
-                        player_score = score
-                        break
-
-    # ----------------------------------------------
-    # ПАРСИМ P2
-    # ----------------------------------------------
-
-    if p2 is not None:
-
-        if isinstance(p2, str):
-
-            dealer_cards = parse_cards_from_string(
-                p2
-            )
-
-        elif isinstance(p2, dict):
-
-            for key in [
-                "cards",
-                "Cards",
-                "C",
-                "SC",
-                "S"
-            ]:
-
-                value = p2.get(key)
-
-                if value:
-
-                    if isinstance(value, str):
-                        dealer_cards.extend(
-                            parse_cards_from_string(
-                                value
-                            )
-                        )
-                    else:
-                        dealer_cards.extend(
-                            find_cards_recursive(
-                                value
-                            )
-                        )
-
-            for key in [
-                "score",
-                "Score",
-                "points",
-                "Points",
-                "value",
-                "V"
-            ]:
-
-                if key in p2:
-
-                    score = extract_score(
-                        p2[key]
-                    )
-
-                    if score is not None:
-                        dealer_score = score
-                        break
-
-    # ----------------------------------------------
-    # FALLBACK:
-    # ИЩЕМ КАРТЫ ВО ВСЁМ JSON
-    # ----------------------------------------------
-
-    if not player_cards and not dealer_cards:
-
-        all_cards = find_cards_recursive(
-            data
-        )
-
-        # Если API отдаёт последовательность
-        # без P1/P2 — пока не можем точно
-        # разделить игрока и дилера
-        if all_cards:
-            print(
-                f"⚠️ {game_id}: найдены карты, "
-                f"но не удалось разделить P1/P2",
-                flush=True
-            )
-
-    # ----------------------------------------------
-    # FALLBACK SCORES
-    # ----------------------------------------------
-
-    if player_score is None:
-
-        for key in [
-            "P1Score",
-            "p1Score",
-            "playerScore"
-        ]:
-
-            if key in data:
-
-                player_score = extract_score(
-                    data[key]
-                )
-
-                if player_score is not None:
-                    break
-
-    if dealer_score is None:
-
-        for key in [
-            "P2Score",
-            "p2Score",
-            "dealerScore"
-        ]:
-
-            if key in data:
-
-                dealer_score = extract_score(
-                    data[key]
-                )
-
-                if dealer_score is not None:
-                    break
-
-    # ----------------------------------------------
-    # ПРОВЕРКА
-    # ----------------------------------------------
-
-    if not player_cards:
-        return None
-
-    if player_score is None:
-        return None
-
-    if dealer_score is None:
-        return None
-
-    return {
-        "game_id": str(game_id),
-        "player_score": int(player_score),
-        "dealer_score": int(dealer_score),
-        "player_cards": player_cards,
-        "dealer_cards": dealer_cards,
-        "raw_received_at": datetime.now(
-            MOSCOW_TZ
-        ).isoformat()
-    }
-
-
-# ==================================================
-# SAVE NEW GAME
-# ==================================================
-
-def save_new_game(game):
-
-    global history_data
-
-    game_id = str(
-        game.get("game_id")
-    )
-
-    # Уже существует?
-    for item in history_data:
-
-        if str(item.get("game_id")) == game_id:
-            return None
-
-    # Новый последовательный номер
-    game_number = get_next_game_number()
-
-    game["game_number"] = game_number
-
-    history_data.append(game)
-
-    # Только последние 100
-    history_data.sort(
-        key=lambda x: int(
-            x.get("game_number", 0)
-        )
-    )
-
-    if len(history_data) > MAX_HISTORY_GAMES:
-        history_data = history_data[
-            -MAX_HISTORY_GAMES:
-        ]
-
-    atomic_save_json(
-        DATA_FILE,
-        history_data
-    )
-
-    print(
-        f"\n💾 НОВАЯ ИГРА СОХРАНЕНА",
-        flush=True
-    )
-
-    print(
-        f"🎮 #N{game_number}",
-        flush=True
-    )
-
-    print(
-        f"🆔 ID: {game_id}",
-        flush=True
-    )
-
-    print(
-        f"👤 Игрок: "
-        f"{game['player_score']} "
-        f"{game['player_cards']}",
-        flush=True
-    )
-
-    print(
-        f"🎩 Дилер: "
-        f"{game['dealer_score']} "
-        f"{game['dealer_cards']}",
-        flush=True
-    )
-
-    return game
-
-
-# ==================================================
-# BUILD PATTERN PREDICTION
-# ==================================================
-
-def build_pattern_prediction(game):
-
-    if not game:
-        return None
-
-    player_score = game.get(
-        "player_score"
-    )
-
-    dealer_score = game.get(
-        "dealer_score"
-    )
-
-    # ----------------------------------------------
-    # ОЧКИ ОБЯЗАТЕЛЬНЫ
-    # ----------------------------------------------
-
-    if player_score is None:
-        return None
-
-    if dealer_score is None:
-        return None
-
-    # ----------------------------------------------
-    # У ИГРОКА СТРОГО МЕНЬШЕ 21
-    # ----------------------------------------------
-
-    if player_score >= 21:
-
-        print(
-            f"🚫 #N{game['game_number']} "
-            f"пропуск: игрок "
-            f"{player_score} очков (нужно <21)",
-            flush=True
-        )
-
-        return None
-
-    # ----------------------------------------------
-    # У ДИЛЕРА НЕ ДОЛЖНО БЫТЬ 21
-    # ----------------------------------------------
-
-    if dealer_score == 21:
-
-        print(
-            f"🚫 #N{game['game_number']} "
-            f"пропуск: дилер 21",
-            flush=True
-        )
-
-        return None
-
-    # ----------------------------------------------
-    # НИЧЬЯ
-    # ----------------------------------------------
-
-    if player_score == dealer_score:
-
-        print(
-            f"🚫 #N{game['game_number']} "
-            f"пропуск: ничья "
-            f"{player_score}:{dealer_score}",
-            flush=True
-        )
-
-        return None
-
-    # ----------------------------------------------
-    # КАРТЫ ИГРОКА
-    # ----------------------------------------------
-
-    player_cards = game.get(
-        "player_cards",
-        []
-    )
-
-    if not player_cards:
-        return None
-
-    first_card = player_cards[0]
-
-    match = re.match(
-        r"(10|[2-9AJQK])([♠♣♦♥])",
-        first_card
-    )
-
-    if not match:
-        return None
-
-    source_rank = normalize_rank(
-        match.group(1)
-    )
-
-    source_suit = normalize_suit(
-        match.group(2)
-    )
-
-    if not source_rank:
-        return None
-
-    if not source_suit:
-        return None
-
-    # ----------------------------------------------
-    # ТОЛЬКО J Q K A
-    # ----------------------------------------------
-
-    if source_rank not in SOURCE_RANKS:
-
-        print(
-            f"⏭️ #N{game['game_number']} "
-            f"первая карта {first_card} "
-            f"не J/Q/K/A",
-            flush=True
-        )
-
-        return None
-
-    # ----------------------------------------------
-    # ЗЕРКАЛЬНЫЙ РАНГ
-    # ----------------------------------------------
-
-    target_rank = RANK_MIRROR.get(
-        source_rank
-    )
-
-    if not target_rank:
-        return None
-
-    # ----------------------------------------------
-    # ЗЕРКАЛЬНАЯ МАСТЬ
-    # ----------------------------------------------
-
-    mirror_suit = SUIT_MIRROR.get(
-        source_suit
-    )
-
-    if not mirror_suit:
-        return None
-
-    # ----------------------------------------------
-    # ДВЕ КАРТЫ
-    # ----------------------------------------------
-
-    card_original = normalize_card(
-        target_rank,
-        source_suit
-    )
-
-    card_mirror = normalize_card(
-        target_rank,
-        mirror_suit
-    )
-
-    predicted_cards = []
-
-    if card_original:
-        predicted_cards.append(
-            card_original
-        )
-
-    if (
-        card_mirror
-        and card_mirror not in predicted_cards
-    ):
-        predicted_cards.append(
-            card_mirror
-        )
-
-    if not predicted_cards:
-        return None
-
-    # ----------------------------------------------
-    # ЦЕЛЬ +11
-    # ----------------------------------------------
-
-    target_number = add_game_offset(
-        game["game_number"],
-        PREDICTION_OFFSET
-    )
-
-    return {
-        "source_number":
-            game["game_number"],
-
-        "source_game_id":
-            game["game_id"],
-
-        "source_card":
-            first_card,
-
-        "source_rank":
-            source_rank,
-
-        "source_suit":
-            source_suit,
-
-        "target_rank":
-            target_rank,
-
-        "target_number":
-            target_number,
-
-        "predicted_cards":
-            predicted_cards
-    }
-
-
-# ==================================================
-# CHECK DUPLICATE PREDICTION
-# ==================================================
-
-def prediction_exists(source_game_id):
-
-    for entry in predictions:
-
-        if str(
-            entry.get("source_game_id")
-        ) == str(source_game_id):
-
-            return True
-
-    return False
-
-
-# ==================================================
-# MESSAGE
+# MAKE PREDICTION MESSAGE
 # ==================================================
 
 def make_prediction_message(entry):
-
-    cards_text = " + ".join(
-        entry.get(
-            "predicted_cards",
-            []
-        )
-    )
 
     return (
         f"🎯 <b>Игра: "
         f"#N{entry['target_number']}</b>\n\n"
 
-        f"🃏 <b>{cards_text}</b>\n\n"
+        f"🃏 <b>{entry['predicted_card']}</b>\n\n"
 
-        f"📊 Паттерн: первая карта игрока "
-        f"{entry['source_card']}\n"
-
-        f"🔗 Источник: "
+        f"🔥 Триггер: "
         f"#N{entry['source_number']}\n"
 
+        f"👤 Игрок: "
+        f"{entry['player_score']} "
+        f"({entry['player_cards_text']})\n"
+
+        f"🎩 Дилер: "
+        f"{entry['dealer_score']} "
+        f"({entry['dealer_cards_text']})\n\n"
+
         f"⏩ Смещение: "
-        f"+{PREDICTION_OFFSET} игр"
+        f"+{entry['offset']} игр"
     )
 
 
 # ==================================================
-# CREATE PREDICTION
+# CREATE PREDICTIONS
 # ==================================================
 
-def create_pattern_prediction(game):
+def create_trigger_predictions(game):
 
     global predictions
-    global last_prediction_time
 
-    if prediction_exists(
-        game.get("game_id")
-    ):
-        return None
-
-    pattern = build_pattern_prediction(
+    patterns = build_trigger_predictions(
         game
     )
 
-    if not pattern:
-        return None
+    if not patterns:
+        return
 
-    now = time.time()
-
-    if now - last_prediction_time < 1:
-        return None
-
-    entry = {
-        "source_number":
-            pattern["source_number"],
-
-        "source_game_id":
-            pattern["source_game_id"],
-
-        "source_card":
-            pattern["source_card"],
-
-        "source_rank":
-            pattern["source_rank"],
-
-        "source_suit":
-            pattern["source_suit"],
-
-        "target_rank":
-            pattern["target_rank"],
-
-        "target_number":
-            pattern["target_number"],
-
-        "predicted_cards":
-            pattern["predicted_cards"],
-
-        "status": "pending",
-
-        "created_at":
-            datetime.now(
-                MOSCOW_TZ
-            ).isoformat(),
-
-        "message_id": None,
-
-        "original_text": "",
-
-        "result_game": None,
-
-        "found_card": None,
-
-        "current_dogon": 0
-    }
-
-    predictions.append(entry)
-
-    message = make_prediction_message(
-        entry
+    source_number = int(
+        game.get("game_number")
     )
 
-    entry["original_text"] = message
+    source_game_id = str(
+        game.get("game_id")
+    )
+
+    for pattern in patterns:
+
+        if prediction_exists(
+            source_game_id,
+            pattern["target_number"]
+        ):
+            continue
+
+        entry = {
+            "source_number": source_number,
+
+            "source_game_id": source_game_id,
+
+            "player_score": (
+                game["player_score"]
+            ),
+
+            "dealer_score": (
+                game["dealer_score"]
+            ),
+
+            "player_cards": (
+                game["player_cards"]
+            ),
+
+            "dealer_cards": (
+                game["dealer_cards"]
+            ),
+
+            "prediction_type": (
+                pattern["prediction_type"]
+            ),
+
+            "offset": pattern["offset"],
+
+            "target_number": (
+                pattern["target_number"]
+            ),
+
+            "predicted_card": (
+                pattern["predicted_card"]
+            ),
+
+            # Прогноз создаётся сразу
+            "status": "pending",
+
+            "message_id": None,
+
+            "original_text": "",
+
+            "result_game": None,
+
+            "found_card": None,
+
+            "current_dogon": 0,
+
+            "created_at": datetime.now(
+                MOSCOW_TZ
+            ).isoformat()
+        }
+
+        entry["player_cards_text"] = (
+            " ".join(
+                entry.get(
+                    "player_cards",
+                    []
+                )
+            )
+        )
+
+        entry["dealer_cards_text"] = (
+            " ".join(
+                entry.get(
+                    "dealer_cards",
+                    []
+                )
+            )
+        )
+
+        message = make_prediction_message(
+            entry
+        )
+
+        entry["original_text"] = message
+
+        message_id = telegram_send(
+            message
+        )
+
+        if message_id:
+
+            entry["message_id"] = message_id
+
+        predictions.append(entry)
+
+        print()
+        print(
+            "══════════════════════════════",
+            flush=True
+        )
+        print(
+            "🔥 НАЙДЕН ТРИГГЕР",
+            flush=True
+        )
+        print(
+            f"🎮 #N{source_number}",
+            flush=True
+        )
+        print(
+            f"👤 Игрок: "
+            f"{game['player_cards']}",
+            flush=True
+        )
+        print(
+            f"🎩 Дилер: "
+            f"{game['dealer_cards']}",
+            flush=True
+        )
+        print()
+        print(
+            f"🃏 ПРОГНОЗ: "
+            f"{entry['predicted_card']}",
+            flush=True
+        )
+        print(
+            f"🎯 ЦЕЛЬ: "
+            f"#N{entry['target_number']}",
+            flush=True
+        )
+        print(
+            f"⏩ СМЕЩЕНИЕ: "
+            f"+{entry['offset']}",
+            flush=True
+        )
+        print(
+            "══════════════════════════════",
+            flush=True
+        )
 
     atomic_save_json(
         PREDICTIONS_FILE,
         predictions
     )
 
-    message_id = telegram_send(
-        message
-    )
-
-    if message_id:
-
-        entry["message_id"] = message_id
-
-        atomic_save_json(
-            PREDICTIONS_FILE,
-            predictions
-        )
-
-    last_prediction_time = now
-
-    print(
-        "\n══════════════════════════════",
-        flush=True
-    )
-
-    print(
-        "🔮 НОВЫЙ ПРОГНОЗ",
-        flush=True
-    )
-
-    print(
-        f"📥 Источник: "
-        f"#N{entry['source_number']}",
-        flush=True
-    )
-
-    print(
-        f"🎯 Цель: "
-        f"#N{entry['target_number']}",
-        flush=True
-    )
-
-    print(
-        f"🃏 Прогноз: "
-        f"{' + '.join(entry['predicted_cards'])}",
-        flush=True
-    )
-
-    print(
-        "══════════════════════════════\n",
-        flush=True
-    )
-
-    return entry
-
 
 # ==================================================
-# UPDATE MESSAGE
+# UPDATE PREDICTION STATUS
 # ==================================================
 
 def update_prediction_status(
@@ -1529,33 +1477,24 @@ def update_prediction_status(
             f"{DOGON_GAMES + 1} игр"
         )
 
-    new_text = "\n".join(lines)
-
     telegram_edit(
         message_id,
-        new_text
+        "\n".join(lines)
     )
 
 
 # ==================================================
-# FIND GAME BY NUMBER
-# ==================================================
-
-def get_game_by_number(number):
-
-    for game in history_data:
-
-        if int(
-            game.get("game_number", 0)
-        ) == int(number):
-
-            return game
-
-    return None
-
-
-# ==================================================
 # CHECK PREDICTIONS
+#
+# Проверяем:
+#
+# Цель
+# +1
+# +2
+# +3
+# +4
+#
+# Ищем карту у игрока ИЛИ дилера
 # ==================================================
 
 def check_predictions():
@@ -1564,45 +1503,34 @@ def check_predictions():
 
     changed = False
 
-    pending = [
-        x for x in predictions
-        if x.get("status") == "pending"
-    ]
+    for entry in predictions:
 
-    for entry in pending:
+        if entry.get("status") != "pending":
+            continue
 
         target = entry.get(
             "target_number"
         )
 
-        predicted_cards = entry.get(
-            "predicted_cards",
-            []
+        predicted_card = entry.get(
+            "predicted_card"
         )
 
-        if not target:
+        if target is None:
             continue
 
-        if not predicted_cards:
+        if not predicted_card:
             continue
 
         found = None
-
         all_available = True
-
-        # ------------------------------------------
-        # ОСНОВНАЯ + ДОГОНЫ
-        # ------------------------------------------
 
         for dogon in range(
             DOGON_GAMES + 1
         ):
 
             check_number = (
-                add_game_offset(
-                    target,
-                    dogon
-                )
+                int(target) + dogon
             )
 
             game = get_game_by_number(
@@ -1616,38 +1544,42 @@ def check_predictions():
 
             actual_cards = []
 
-            for card in game.get(
-                "player_cards",
-                []
-            ):
-                if card not in actual_cards:
-                    actual_cards.append(card)
+            actual_cards.extend(
+                game.get(
+                    "player_cards",
+                    []
+                )
+            )
 
-            for card in game.get(
-                "dealer_cards",
-                []
-            ):
-                if card not in actual_cards:
-                    actual_cards.append(card)
+            actual_cards.extend(
+                game.get(
+                    "dealer_cards",
+                    []
+                )
+            )
 
-            for predicted in predicted_cards:
+            normalized_cards = []
 
-                if predicted in actual_cards:
+            for card in actual_cards:
 
-                    found = {
-                        "num": check_number,
-                        "dogon": dogon,
-                        "card": predicted
-                    }
+                normalized = (
+                    normalize_card_string(card)
+                )
 
-                    break
+                if normalized:
+                    normalized_cards.append(
+                        normalized
+                    )
 
-            if found:
+            if predicted_card in normalized_cards:
+
+                found = {
+                    "num": check_number,
+                    "dogon": dogon,
+                    "card": predicted_card
+                }
+
                 break
-
-        # ------------------------------------------
-        # WIN
-        # ------------------------------------------
 
         if found:
 
@@ -1669,8 +1601,8 @@ def check_predictions():
 
             print(
                 f"✅ ПРОГНОЗ ЗАШЁЛ | "
-                f"Цель #N{target} | "
-                f"Результат #N{found['num']} | "
+                f"#N{target} → "
+                f"#N{found['num']} | "
                 f"{found['card']}",
                 flush=True
             )
@@ -1683,16 +1615,8 @@ def check_predictions():
 
             continue
 
-        # ------------------------------------------
-        # ЕЩЁ ЖДЁМ ИГРЫ
-        # ------------------------------------------
-
         if not all_available:
             continue
-
-        # ------------------------------------------
-        # LOSE
-        # ------------------------------------------
 
         entry["status"] = "lose"
 
@@ -1704,7 +1628,7 @@ def check_predictions():
 
         print(
             f"❌ ПРОГНОЗ НЕ ЗАШЁЛ | "
-            f"Цель #N{target}",
+            f"#N{target}",
             flush=True
         )
 
@@ -1722,113 +1646,230 @@ def check_predictions():
 
 
 # ==================================================
-# CLEANUP PREDICTIONS
+# GET GAME BY NUMBER
 # ==================================================
 
-def cleanup_predictions():
+def get_game_by_number(number):
+
+    try:
+
+        number = int(number)
+
+    except Exception:
+
+        return None
+
+    for game in history_data:
+
+        try:
+
+            if int(
+                game.get(
+                    "game_number",
+                    0
+                )
+            ) == number:
+
+                return game
+
+        except Exception:
+            continue
+
+    return None
+
+
+# ==================================================
+# UPDATE ACTIVE GAME
+# ==================================================
+
+def update_active_game(game_id):
+
+    data = get_game_data(
+        game_id
+    )
+
+    if not data:
+        return None
+
+    parsed = parse_api_game(
+        game_id,
+        data
+    )
+
+    if not parsed:
+        return None
+
+    active_games_cache[
+        str(game_id)
+    ] = parsed
+
+    return parsed
+
+
+# ==================================================
+# PROCESS ACTIVE GAMES
+# ==================================================
+
+def process_active_games():
+
+    active_games = get_active_games()
+
+    if not active_games:
+        return
+
+    current_ids = set()
+
+    # ----------------------------------------------
+    # Обновляем все активные игры
+    # ----------------------------------------------
+
+    for game_info in active_games:
+
+        game_id = str(
+            game_info.get("id")
+        )
+
+        if not game_id:
+            continue
+
+        if game_id in processed_games:
+            continue
+
+        current_ids.add(game_id)
+
+        parsed = update_active_game(
+            game_id
+        )
+
+        if not parsed:
+            continue
+
+        if is_game_finished(
+            parsed.get("state"),
+            parsed.get(
+                "player_cards",
+                []
+            ),
+            parsed.get(
+                "dealer_cards",
+                []
+            ),
+            parsed.get(
+                "player_score",
+                0
+            ),
+            parsed.get(
+                "dealer_score",
+                0
+            )
+        ):
+
+            saved = save_new_game(
+                parsed
+            )
+
+            if saved:
+
+                create_trigger_predictions(
+                    saved
+                )
+
+            processed_games.add(
+                game_id
+            )
+
+            active_games_cache.pop(
+                game_id,
+                None
+            )
+
+    # ----------------------------------------------
+    # Проверяем игры из кэша
+    # ----------------------------------------------
+
+    cached_ids = list(
+        active_games_cache.keys()
+    )
+
+    for game_id in cached_ids:
+
+        if game_id in processed_games:
+            continue
+
+        if game_id in current_ids:
+            continue
+
+        parsed = update_active_game(
+            game_id
+        )
+
+        if not parsed:
+            continue
+
+        if is_game_finished(
+            parsed.get("state"),
+            parsed.get(
+                "player_cards",
+                []
+            ),
+            parsed.get(
+                "dealer_cards",
+                []
+            ),
+            parsed.get(
+                "player_score",
+                0
+            ),
+            parsed.get(
+                "dealer_score",
+                0
+            )
+        ):
+
+            saved = save_new_game(
+                parsed
+            )
+
+            if saved:
+
+                create_trigger_predictions(
+                    saved
+                )
+
+            processed_games.add(
+                game_id
+            )
+
+            active_games_cache.pop(
+                game_id,
+                None
+            )
+
+
+# ==================================================
+# CLEANUP
+# ==================================================
+
+def cleanup():
 
     global predictions
+    global processed_games
 
-    if len(predictions) > 1000:
+    if len(predictions) > MAX_PREDICTIONS:
 
-        predictions = predictions[-1000:]
+        predictions = predictions[
+            -MAX_PREDICTIONS:
+        ]
 
         atomic_save_json(
             PREDICTIONS_FILE,
             predictions
         )
 
+    if len(processed_games) > 2000:
 
-# ==================================================
-# PROCESS API GAMES
-# ==================================================
-
-def process_api_games():
-
-    global last_seen_game_ids
-
-    games = get_live_games()
-
-    if not games:
-        return
-
-    candidates = []
-
-    for game in games:
-
-        if not isinstance(game, dict):
-            continue
-
-        league_id = extract_league_id(
-            game
-        )
-
-        # Если league ID найден — фильтруем
-        if (
-            league_id is not None
-            and league_id != BACCARAT_LEAGUE_ID
-        ):
-            continue
-
-        game_id = extract_game_id(
-            game
-        )
-
-        if not game_id:
-            continue
-
-        candidates.append(
-            game_id
-        )
-
-    # ----------------------------------------------
-    # ОБРАБАТЫВАЕМ ИГРЫ
-    # ----------------------------------------------
-
-    for game_id in candidates:
-
-        # Уже в истории?
-        exists = False
-
-        for item in history_data:
-
-            if str(
-                item.get("game_id")
-            ) == str(game_id):
-
-                exists = True
-                break
-
-        if exists:
-            continue
-
-        # Получаем детали
-        raw_data = get_game_details(
-            game_id
-        )
-
-        if not raw_data:
-            continue
-
-        parsed = parse_api_game(
-            game_id,
-            raw_data
-        )
-
-        if not parsed:
-            continue
-
-        # Сохраняем новую игру
-        saved_game = save_new_game(
-            parsed
-        )
-
-        if not saved_game:
-            continue
-
-        # Создаём прогноз
-        create_pattern_prediction(
-            saved_game
+        processed_games = set(
+            list(processed_games)[-1000:]
         )
 
 
@@ -1842,35 +1883,82 @@ def main():
     global predictions
 
     print()
-    print("==================================================")
-    print("🚀 OLD PATTERN API BOT")
-    print("==================================================")
-    print("📡 Источник: 1x API")
     print(
-        f"💾 История: "
-        f"последние {MAX_HISTORY_GAMES} игр"
+        "=================================================="
     )
-    print("🎯 Прогноз: +11 игр")
-    print("🔁 Догоны: 4")
+    print(
+        "🚀 OLD TRIGGER PATTERN BOT"
+    )
+    print(
+        "=================================================="
+    )
+    print(
+        f"📡 API: {BASE_URL}"
+    )
+    print(
+        "💾 Парсинг: Value → SC → P1/P2/STATE"
+    )
     print()
-    print("🚫 Пропуск если:")
-    print("   • Игрок >= 21")
-    print("   • Дилер == 21")
-    print("   • Ничья")
+    print(
+        "🔥 НОВАЯ ЛОГИКА ТРИГГЕРА"
+    )
+    print(
+        "   • Количество карт не важно"
+    )
+    print(
+        "   • Первая карта игрока = масть"
+    )
+    print(
+        "   • Первая карта дилера = цифра"
+    )
     print()
-    print("🃏 Триггер: первая карта J/Q/K/A")
-    print("🔄 Ранги: J↔K | Q↔A")
-    print("🔄 Масти: ♣↔♥ | ♠↔♦")
-    print("==================================================")
+    print(
+        "🃏 ПРЕОБРАЗОВАНИЕ:"
+    )
+    print(
+        "   • 6 → J"
+    )
+    print(
+        "   • 7 → Q"
+    )
+    print(
+        "   • 8 → K"
+    )
+    print(
+        "   • 9 → A"
+    )
     print()
-
-    # ----------------------------------------------
-    # LOAD
-    # ----------------------------------------------
+    print(
+        "🎯 ЦЕЛЬ:"
+    )
+    print(
+        "   Номер игры + цифра дилера"
+    )
+    print()
+    print(
+        "🔁 ДОГОН:"
+    )
+    print(
+        f"   Цель + {DOGON_GAMES} игр"
+    )
+    print(
+        "=================================================="
+    )
+    print()
 
     history_data = load_history()
 
     predictions = load_predictions()
+
+    for game in history_data:
+
+        game_id = game.get("game_id")
+
+        if game_id:
+
+            processed_games.add(
+                str(game_id)
+            )
 
     print(
         f"💾 Загружено игр: "
@@ -1879,7 +1967,7 @@ def main():
     )
 
     print(
-        f"📊 Загружено прогнозов: "
+        f"🔮 Загружено прогнозов: "
         f"{len(predictions)}",
         flush=True
     )
@@ -1896,32 +1984,33 @@ def main():
         )
 
     print()
-    print("🤖 Бот запущен...")
+    print(
+        "🤖 Бот запущен...",
+        flush=True
+    )
     print()
-
-    # ----------------------------------------------
-    # LOOP
-    # ----------------------------------------------
 
     while True:
 
-        start = time.time()
+        started = time.time()
 
         try:
 
-            # 1. Получаем новые игры API
-            process_api_games()
+            # 1. Следим за играми
+            process_active_games()
 
             # 2. Проверяем прогнозы
             check_predictions()
 
-            # 3. Чистим прогнозы
-            cleanup_predictions()
+            # 3. Очистка
+            cleanup()
 
-            elapsed = time.time() - start
+            elapsed = (
+                time.time() - started
+            )
 
             sleep_time = max(
-                0.1,
+                0.2,
                 POLL_INTERVAL - elapsed
             )
 
@@ -1941,9 +2030,14 @@ def main():
         except Exception as e:
 
             print(
-                f"❌ Критическая ошибка: {e}",
+                f"❌ Критическая ошибка: "
+                f"{e}",
                 flush=True
             )
+
+            import traceback
+
+            traceback.print_exc()
 
             time.sleep(3)
 
@@ -1954,3 +2048,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
