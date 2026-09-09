@@ -1,17 +1,17 @@
-import os
+
 import sys
+import re
 import json
 import time
 import requests
-import re
-from datetime import datetime, timedelta
-
 import pytz
 
+from datetime import datetime
 
-# ==================================================
+
+# =====================================================================
 # ENV
-# ==================================================
+# =====================================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -21,881 +21,1709 @@ CHANNEL_PROGNOZ = os.getenv("CHAT_ID_21")
 if not CHANNEL_PROGNOZ:
     CHANNEL_PROGNOZ = os.getenv("CHANNEL_PROGNOZ")
 
-CHANNEL_STATISTICS = os.getenv("CHANNEL_STATISTICS")
-if not CHANNEL_STATISTICS:
-    CHANNEL_STATISTICS = os.getenv("CHAT_ID_STATISTICS")
+CHANNEL_STATS = os.getenv("CHANNEL_STATS")
 
-if not CHANNEL_STATISTICS:
-    CHANNEL_STATISTICS = os.getenv("CHANNEL_STAT")
 
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN не задан!", flush=True)
+    print("❌ BOT_TOKEN не задан", flush=True)
     sys.exit(1)
 
 if not CHANNEL_PROGNOZ:
-    print("❌ CHANNEL_PROGNOZ не задан!", flush=True)
+    print("❌ CHANNEL_PROGNOZ не задан", flush=True)
     sys.exit(1)
 
-if not CHANNEL_STATISTICS:
-    print("❌ CHANNEL_STATISTICS не задан!", flush=True)
+if not CHANNEL_STATS:
+    print("❌ CHANNEL_STATS не задан", flush=True)
     sys.exit(1)
 
 
-# ==================================================
+# =====================================================================
 # CONFIG
-# ==================================================
+# =====================================================================
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-DOGON_GAMES = 4
-MAX_PREDICTIONS = 1000
-
-BASE_URL = "https://1xlite-36553.pro"
-LEAGUE_ID = 1643503
+PREDICTIONS_FILE = "twentyone_predictions.json"
+OFFSET_FILE = "telegram_offset.txt"
 
 POLL_INTERVAL = 2.0
 
+# После первого появления игры ждём 30 секунд,
+# чтобы Telegram успел дописать все карты.
+FINALIZE_WAIT_SECONDS = 30
+
+# #N492 -> #N495
+FORECAST_OFFSET = 3
+
+# Целевая игра + 4 догона.
+DOGON_GAMES = 4
+
+
+# =====================================================================
+# TELEGRAM
+# =====================================================================
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+SESSION = requests.Session()
 
-# ==================================================
-# HTTP
-# ==================================================
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+SESSION.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/150.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json, text/plain, */*",
-    "Referer": f"{BASE_URL}/ru/live/twentyone/1643503-twentyone-game"
+})
+
+
+# =====================================================================
+# GLOBALS
+# =====================================================================
+
+# Только новые игры, пришедшие из CHANNEL_STATS.
+games_cache = {}
+
+# Игры, которые увидели, но ещё ждём 30 секунд.
+pending_games = {}
+
+# Триггеры, которые уже обработаны.
+processed_triggers = set()
+
+# Прогнозы.
+predictions = []
+
+# Telegram update offset.
+telegram_offset = 0
+
+
+# =====================================================================
+# CARD NORMALIZATION
+# =====================================================================
+
+SUITS = {
+    "♠": "♠️",
+    "♣": "♣️",
+    "♦": "♦️",
+    "♥": "♥️",
 }
 
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-
-
-# ==================================================
-# GLOBALS
-# ==================================================
-
-predictions = []
-processed_games = set()
-active_games_cache = {}
-telegram_update_offset = 0
-statistics_games = {}
-
-
-# ==================================================
-# JSON (только для прогнозов)
-# ==================================================
-
-PREDICTIONS_FILE = "twentyone_predictions.json"
-
-
-def load_json_file(filename, default):
-    try:
-        if not os.path.exists(filename):
-            return default
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"⚠️ Ошибка чтения {filename}: {e}", flush=True)
-        return default
-
-
-def atomic_save_json(filename, data):
-    tmp = filename + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, filename)
-        return True
-    except Exception as e:
-        print(f"⚠️ Ошибка сохранения {filename}: {e}", flush=True)
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-        return False
-
-
-def load_predictions():
-    data = load_json_file(PREDICTIONS_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def save_predictions():
-    global predictions
-    if len(predictions) > MAX_PREDICTIONS:
-        predictions = predictions[-MAX_PREDICTIONS:]
-    atomic_save_json(PREDICTIONS_FILE, predictions)
-
-
-def load_telegram_offset():
-    data = load_json_file("telegram_updates_offset.json", {})
-    try:
-        return int(data.get("offset", 0))
-    except Exception:
-        return 0
-
-
-def save_telegram_offset(offset):
-    atomic_save_json("telegram_updates_offset.json", {"offset": int(offset)})
-
-
-# ==================================================
-# CARD HELPERS
-# ==================================================
 
 def normalize_suit(suit):
-    if not suit:
+    if suit is None:
         return None
-    suit = str(suit).replace("\ufe0f", "")
-    return suit if suit in "♠♣♦♥" else None
+
+    suit = str(suit).strip()
+    suit = suit.replace("\ufe0f", "")
+
+    return SUITS.get(suit)
 
 
 def normalize_rank(rank):
-    if not rank:
-        return None
-    rank = str(rank).strip().upper().replace("А", "A")
-    return rank if rank in {"2","3","4","5","6","7","8","9","10","J","Q","K","A"} else None
-
-
-def normalize_card_string(card):
-    if not card:
-        return None
-    card = str(card).replace("\ufe0f", "")
-    match = re.search(r"(10|[2-9AJQKА])([♠♣♦♥])", card)
-    if not match:
-        return None
-    rank = normalize_rank(match.group(1))
-    suit = normalize_suit(match.group(2))
-    return f"{rank}{suit}" if rank and suit else None
-
-
-def get_opposite_suit(suit):
-    suit_map = {
-        "♠": "♣",
-        "♣": "♠",
-        "♦": "♥",
-        "♥": "♦"
-    }
-    return suit_map.get(suit, suit)
-
-
-def get_game_number_fallback():
-    now = datetime.now(MOSCOW_TZ)
-    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
-    if now < start:
-        start -= timedelta(days=1)
-    return int((now - start).total_seconds() / 60) % 1440 + 1
-
-
-# ==================================================
-# API - GET ACTIVE GAMES
-# ==================================================
-
-def get_active_games():
-    try:
-        url = (
-            f"{BASE_URL}/service-api/main-live-feed/v3/games1x2"
-            "?cfView=3&count=40&fcountry=190&gr=415&grMode=4&lng=ru&ref=7&selectedMs=10.146.1643503"
-        )
-        response = SESSION.get(url, timeout=10)
-        if response.status_code != 200:
-            return []
-        data = response.json()
-        if isinstance(data, list):
-            games = data
-        elif isinstance(data, dict) and isinstance(data.get("Value"), list):
-            games = data.get("Value", [])
-        else:
-            return []
-        result = []
-        for game in games:
-            if not isinstance(game, dict):
-                continue
-            league = game.get("liga", {})
-            league_id = league.get("id") if isinstance(league, dict) else None
-            if league_id == LEAGUE_ID:
-                game_id = game.get("id")
-                if game_id:
-                    result.append(game)
-        return result
-    except Exception as e:
-        print(f"❌ Ошибка получения игр: {e}", flush=True)
-        return []
-
-
-# ==================================================
-# API - GET GAME DATA
-# ==================================================
-
-def get_game_data(game_id):
-    url = f"{BASE_URL}/service-api/LiveFeed/GetGameZip"
-    params = {
-        "id": game_id,
-        "isSubGames": "true",
-        "GroupEvents": "true",
-        "countevents": 250,
-        "grMode": 4,
-        "partner": 7,
-        "topGroups": "",
-        "country": 190,
-        "marketType": 1,
-        "isNewBuilder": "true"
-    }
-    try:
-        response = SESSION.get(url, params=params, timeout=8)
-        if response.status_code != 200:
-            return None
-        return response.json()
-    except Exception as e:
-        print(f"❌ Ошибка игры {game_id}: {e}", flush=True)
+    if rank is None:
         return None
 
+    rank = str(rank).strip().upper()
 
-# ==================================================
-# PARSE CARDS & SCORE
-# ==================================================
+    if rank == "А":
+        rank = "A"
 
-def get_cards(value_str):
-    if not value_str or value_str == "[]":
-        return []
-    try:
-        if isinstance(value_str, str):
-            cards = json.loads(value_str)
-        elif isinstance(value_str, list):
-            cards = value_str
-        else:
-            return []
-        suit_map = {0: "♠", 1: "♣", 2: "♦", 3: "♥"}
-        rank_map = {"1": "A", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", 
-                    "7": "7", "8": "8", "9": "9", "10": "10", "11": "J", "12": "Q", "13": "K", "14": "A"}
-        result = []
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            cs = card.get("CS")
-            cv = card.get("CV")
-            try:
-                cv = int(cv)
-            except Exception:
-                pass
-            rank = rank_map.get(str(cv), str(cv))
-            suit = suit_map.get(cs)
-            if rank and suit:
-                result.append(f"{rank}{suit}")
-        return result
-    except Exception:
-        return []
+    if rank in {
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "J",
+        "Q",
+        "K",
+        "A",
+    }:
+        return rank
 
-
-def calculate_score(cards):
-    if not cards:
-        return 0
-    if len(cards) == 2 and all(c.startswith("A") for c in cards):
-        return 21
-    score = 0
-    for card in cards:
-        if not card:
-            continue
-        if card.startswith("10"):
-            score += 10
-        elif card.startswith("2"):
-            score += 2
-        elif card.startswith("3"):
-            score += 3
-        elif card.startswith("4"):
-            score += 4
-        elif card.startswith("5"):
-            score += 5
-        elif card.startswith("6"):
-            score += 6
-        elif card.startswith("7"):
-            score += 7
-        elif card.startswith("8"):
-            score += 8
-        elif card.startswith("9"):
-            score += 9
-        elif card.startswith("J"):
-            score += 2
-        elif card.startswith("Q"):
-            score += 3
-        elif card.startswith("K"):
-            score += 4
-        elif card.startswith("A"):
-            score += 11
-    return score
-
-
-# ==================================================
-# PARSE API GAME
-# ==================================================
-
-def parse_api_game(game_id, data):
-    if not isinstance(data, dict):
-        return None
-    value = data.get("Value")
-    if not isinstance(value, dict):
-        return None
-    sc = value.get("SC", {})
-    if not isinstance(sc, dict):
-        return None
-    player_cards = []
-    dealer_cards = []
-    state = None
-    for item in sc.get("S", []):
-        if not isinstance(item, dict):
-            continue
-        key = item.get("Key")
-        item_value = item.get("Value", "[]")
-        if key == "P1":
-            player_cards = get_cards(item_value)
-        elif key == "P2":
-            dealer_cards = get_cards(item_value)
-        elif key == "STATE":
-            state = str(item_value)
-    if not player_cards:
-        return None
-    raw_game_num = value.get("DI") or value.get("TN")
-    if raw_game_num:
-        match = re.search(r"\d+", str(raw_game_num))
-        game_number = int(match.group()) if match else get_game_number_fallback()
-    else:
-        game_number = get_game_number_fallback()
-    return {
-        "game_id": str(game_id),
-        "game_number": game_number,
-        "player_cards": player_cards,
-        "dealer_cards": dealer_cards,
-        "player_score": calculate_score(player_cards),
-        "dealer_score": calculate_score(dealer_cards),
-        "state": state,
-        "updated_at": datetime.now(MOSCOW_TZ).isoformat()
-    }
-
-
-# ==================================================
-# GAME FINISHED
-# ==================================================
-
-def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
-    if len(player_cards) == 2 and p_score == 21:
-        return True
-    if dealer_cards and len(dealer_cards) == 2 and d_score == 21:
-        return True
-    if state == "5":
-        return True
-    if state == "4":
-        if p_score == 21:
-            return True
-        if dealer_cards and d_score in (20, 21):
-            return True
-        return False
-    if p_score > 21:
-        return True
-    if dealer_cards and d_score > 21:
-        return True
-    if len(player_cards) >= 5:
-        return True
-    if dealer_cards and len(dealer_cards) >= 5:
-        return True
-    return False
-
-
-# ==================================================
-# TRIGGER LOGIC
-# ==================================================
-
-def build_trigger_predictions(game):
-    if not game:
-        return []
-    player_cards = game.get("player_cards", [])
-    dealer_cards = game.get("dealer_cards", [])
-    if not player_cards or not dealer_cards:
-        return []
-    player_first = normalize_card_string(player_cards[0])
-    dealer_first = normalize_card_string(dealer_cards[0])
-    if not player_first or not dealer_first:
-        return []
-    player_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", player_first)
-    dealer_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", dealer_first)
-    if not player_match or not dealer_match:
-        return []
-    player_rank = player_match.group(1)
-    player_suit = player_match.group(2)
-    dealer_rank = dealer_match.group(1)
-    allowed_digits = {"6", "7", "8", "9"}
-    if player_rank not in allowed_digits or dealer_rank not in allowed_digits:
-        return []
-    rank_map = {"6": "J", "7": "Q", "8": "K", "9": "A"}
-    predicted_rank = rank_map.get(dealer_rank)
-    if not predicted_rank:
-        return []
-    try:
-        source_number = int(game.get("game_number"))
-        offset = int(dealer_rank)
-    except Exception:
-        return []
-    target_number = source_number + offset
-    return [{
-        "prediction_type": "dealer_digit",
-        "offset": offset,
-        "target_number": target_number,
-        "predicted_card": f"{predicted_rank}{player_suit}",
-        "source_player_rank": player_rank,
-        "source_player_suit": player_suit,
-        "source_dealer_rank": dealer_rank,
-        "predicted_rank": predicted_rank
-    }]
-
-
-def prediction_exists(source_game_id, target_number):
-    for entry in predictions:
-        if str(entry.get("source_game_id")) == str(source_game_id) and int(entry.get("target_number", 0)) == int(target_number):
-            return True
-    return False
-
-
-# ==================================================
-# TELEGRAM
-# ==================================================
-
-def telegram_send(text):
-    try:
-        response = SESSION.post(
-            f"{TELEGRAM_API}/sendMessage",
-            json={"chat_id": CHANNEL_PROGNOZ, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=10
-        )
-        data = response.json()
-        if data.get("ok"):
-            return data["result"].get("message_id")
-        print(f"❌ Telegram send: {data}", flush=True)
-    except Exception as e:
-        print(f"❌ Telegram send error: {e}", flush=True)
     return None
 
 
-def telegram_edit(message_id, text):
-    if not message_id:
-        return False
-    try:
-        response = SESSION.post(
-            f"{TELEGRAM_API}/editMessageText",
-            json={"chat_id": CHANNEL_PROGNOZ, "message_id": message_id, "text": text, "parse_mode": "HTML"},
-            timeout=10
+def card_to_text(card):
+    if not card:
+        return ""
+
+    rank = normalize_rank(card.get("rank"))
+    suit = normalize_suit(card.get("suit"))
+
+    if not rank or not suit:
+        return ""
+
+    return f"{rank}{suit}"
+
+
+def cards_to_text(cards):
+    result = []
+
+    for card in cards:
+        value = card_to_text(card)
+
+        if value:
+            result.append(value)
+
+    return " ".join(result)
+
+
+# =====================================================================
+# CYBER 21 SCORE
+# =====================================================================
+
+CARD_VALUES = {
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "10": 10,
+    "J": 2,
+    "Q": 3,
+    "K": 4,
+    "A": 11,
+}
+
+
+def cyber21_score(cards):
+    total = 0
+
+    for card in cards:
+        rank = normalize_rank(card.get("rank"))
+
+        if rank in CARD_VALUES:
+            total += CARD_VALUES[rank]
+
+    return total
+
+
+# =====================================================================
+# PARSE CARDS
+# =====================================================================
+
+CARD_RE = re.compile(
+    r"(10|[6-9AJQK])\s*"
+    r"(♠|♣|♦|♥)"
+    r"\ufe0f?"
+)
+
+
+def parse_cards(text):
+    """
+    Разбор карт из текста Telegram.
+
+    Например:
+
+    6♥️A♥️8♠️
+
+    ->
+
+    [
+        {"rank": "6", "suit": "♥️"},
+        {"rank": "A", "suit": "♥️"},
+        {"rank": "8", "suit": "♠️"}
+    ]
+    """
+
+    result = []
+
+    if not text:
+        return result
+
+    for match in CARD_RE.finditer(text):
+
+        rank = normalize_rank(
+            match.group(1)
         )
-        return bool(response.json().get("ok"))
-    except Exception as e:
-        print(f"❌ Telegram edit error: {e}", flush=True)
-        return False
 
+        suit = normalize_suit(
+            match.group(2)
+        )
 
-# ==================================================
-# MAKE PREDICTION MESSAGE (С ДВУМЯ МАСТЯМИ)
-# ==================================================
-
-def make_prediction_message(entry):
-    predicted_card = entry.get("predicted_card", "")
-    
-    card_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", predicted_card)
-    if card_match:
-        rank = card_match.group(1)
-        suit = card_match.group(2)
-        opposite_suit = get_opposite_suit(suit)
-        opposite_card = f"{rank}{opposite_suit}"
-        display_cards = f"{predicted_card} / {opposite_card}"
-    else:
-        display_cards = predicted_card
-    
-    return f"🎯 <b>Игра: #N{entry['target_number']}</b>\n\n🃏 <b>{display_cards}</b>"
-
-
-def create_trigger_predictions(game):
-    global predictions
-    patterns = build_trigger_predictions(game)
-    if not patterns:
-        return
-    source_number = int(game.get("game_number"))
-    source_game_id = str(game.get("game_id"))
-    print(f"🔥 Триггер: #N{source_number} -> #N{patterns[0]['target_number']} | {patterns[0]['predicted_card']}", flush=True)
-    for pattern in patterns:
-        entry = {
-            "source_number": source_number,
-            "source_game_id": source_game_id,
-            "player_score": game.get("player_score"),
-            "dealer_score": game.get("dealer_score"),
-            "player_cards": game.get("player_cards", []),
-            "dealer_cards": game.get("dealer_cards", []),
-            "source_player_card": game.get("player_cards", ["?"])[0],
-            "source_dealer_card": game.get("dealer_cards", ["?"])[0],
-            "source_player_rank": pattern["source_player_rank"],
-            "source_player_suit": pattern["source_player_suit"],
-            "source_dealer_rank": pattern["source_dealer_rank"],
-            "predicted_rank": pattern["predicted_rank"],
-            "prediction_type": pattern["prediction_type"],
-            "offset": pattern["offset"],
-            "target_number": pattern["target_number"],
-            "predicted_card": pattern["predicted_card"],
-            "status": "pending",
-            "message_id": None,
-            "original_text": "",
-            "result_game": None,
-            "found_card": None,
-            "current_dogon": 0,
-            "created_at": datetime.now(MOSCOW_TZ).isoformat()
-        }
-        if prediction_exists(source_game_id, entry["target_number"]):
+        if not rank or not suit:
             continue
-        message = make_prediction_message(entry)
-        entry["original_text"] = message
-        message_id = telegram_send(message)
-        if message_id:
-            entry["message_id"] = message_id
-        predictions.append(entry)
-        print(f"🔮 Прогноз: #N{entry['target_number']} -> {entry['predicted_card']}", flush=True)
-    save_predictions()
+
+        result.append({
+            "rank": rank,
+            "suit": suit,
+        })
+
+    return result
 
 
-# ==================================================
-# PARSE STATISTICS CHANNEL
-# ==================================================
+# =====================================================================
+# PARSE GAME MESSAGE
+# =====================================================================
 
-def parse_statistics_message(text):
+def parse_game_message(text):
+    """
+    Разбираем:
+
+    #N492. 25(6♥️A♥️8♠️) - 20(10♦️K♥️) #T45
+
+    Первая скобка = Player.
+    Вторая скобка = Dealer.
+
+    Напечатанные очки перед скобками НЕ используем.
+    Считаем Cyber 21 самостоятельно.
+    """
+
     if not text:
         return None
-    
-    text = str(text).replace("\ufe0f", "")
-    
-    number_match = re.search(r"#N\s*(\d+)", text, re.IGNORECASE)
+
+    number_match = re.search(
+        r"#N(\d+)",
+        text
+    )
+
     if not number_match:
         return None
-    
-    game_number = int(number_match.group(1))
-    
-    pattern = r"(?:✅)?\s*(\d+)\s*\(([^)]+)\)"
-    matches = re.findall(pattern, text)
-    
-    if len(matches) < 2:
+
+    game_number = int(
+        number_match.group(1)
+    )
+
+    groups = re.findall(
+        r"\(([^()]*)\)",
+        text
+    )
+
+    if len(groups) < 2:
         return None
-    
-    player_score_str = matches[0][0]
-    player_cards_str = matches[0][1]
-    dealer_score_str = matches[1][0]
-    dealer_cards_str = matches[1][1]
-    
-    player_cards = []
-    card_pattern = r"(10|[2-9AJQK])([♠♣♦♥])"
-    
-    for rank, suit in re.findall(card_pattern, player_cards_str):
-        rank = normalize_rank(rank)
-        suit = normalize_suit(suit)
-        if rank and suit:
-            player_cards.append(f"{rank}{suit}")
-    
-    dealer_cards = []
-    for rank, suit in re.findall(card_pattern, dealer_cards_str):
-        rank = normalize_rank(rank)
-        suit = normalize_suit(suit)
-        if rank and suit:
-            dealer_cards.append(f"{rank}{suit}")
-    
-    if not player_cards and not dealer_cards:
+
+    player_text = groups[0]
+    dealer_text = groups[1]
+
+    player_cards = parse_cards(
+        player_text
+    )
+
+    dealer_cards = parse_cards(
+        dealer_text
+    )
+
+    if not player_cards or not dealer_cards:
         return None
-    
+
+    player_score = cyber21_score(
+        player_cards
+    )
+
+    dealer_score = cyber21_score(
+        dealer_cards
+    )
+
+    id_match = re.search(
+        r"ID:\s*(\d+)",
+        text
+    )
+
+    game_id = (
+        id_match.group(1)
+        if id_match
+        else None
+    )
+
+    # #X = ничья.
+    is_draw = bool(
+        re.search(
+            r"#X\b",
+            text
+        )
+    )
+
     return {
         "game_number": game_number,
+        "game_id": game_id,
+
         "player_cards": player_cards,
         "dealer_cards": dealer_cards,
-        "player_score": int(player_score_str) if player_score_str.isdigit() else 0,
-        "dealer_score": int(dealer_score_str) if dealer_score_str.isdigit() else 0,
-        "raw_text": text
+
+        "player_score": player_score,
+        "dealer_score": dealer_score,
+
+        "is_draw": is_draw,
+
+        "raw_text": text,
     }
 
 
-# ==================================================
-# FETCH STATISTICS FROM CHANNEL
-# ==================================================
+# =====================================================================
+# LOG GAME
+# =====================================================================
 
-def fetch_statistics_channel():
-    global telegram_update_offset, statistics_games
-    
+def log_game(game):
+
+    player = game.get(
+        "player_cards",
+        []
+    )
+
+    dealer = game.get(
+        "dealer_cards",
+        []
+    )
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "────────────────────────────────────",
+        flush=True
+    )
+
+    print(
+        f"🔒 ИГРА ЗАФИКСИРОВАНА "
+        f"#N{game['game_number']}",
+        flush=True
+    )
+
+    print(
+        f"👤 P: {game['player_score']} "
+        f"({cards_to_text(player)})",
+        flush=True
+    )
+
+    print(
+        f"🎰 D: {game['dealer_score']} "
+        f"({cards_to_text(dealer)})",
+        flush=True
+    )
+
+    if game.get("is_draw"):
+        print(
+            "🔰 #X — НИЧЬЯ",
+            flush=True
+        )
+
+    print(
+        "────────────────────────────────────",
+        flush=True
+    )
+
+
+# =====================================================================
+# OFFSET
+# =====================================================================
+
+def load_offset():
+
     try:
-        params = {"timeout": 2, "allowed_updates": json.dumps(["channel_post", "edited_channel_post"])}
-        if telegram_update_offset > 0:
-            params["offset"] = telegram_update_offset
-        
-        response = SESSION.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=5)
-        data = response.json()
-        
-        if not data.get("ok"):
-            return
-        
-        updates = data.get("result", [])
-        if not updates:
-            save_telegram_offset(telegram_update_offset)
-            return
-        
-        for update in updates:
-            try:
-                update_id = update.get("update_id")
-                if update_id is not None:
-                    telegram_update_offset = int(update_id) + 1
-                
-                message = update.get("channel_post") or update.get("edited_channel_post")
-                if not message:
-                    continue
-                
-                chat_id = str(message.get("chat", {}).get("id", ""))
-                if chat_id != str(CHANNEL_STATISTICS):
-                    continue
-                
-                text = message.get("text") or message.get("caption")
-                if not text:
-                    continue
-                
-                parsed = parse_statistics_message(text)
-                if not parsed:
-                    continue
-                
-                game_number = parsed["game_number"]
-                statistics_games[int(game_number)] = parsed
-                
-                print(f"📊 Статистика: #N{game_number} | Игрок: {parsed['player_cards']} vs Дилер: {parsed['dealer_cards']}", flush=True)
-                
-            except Exception as e:
-                print(f"⚠️ Ошибка обработки: {e}", flush=True)
-        
-        save_telegram_offset(telegram_update_offset)
-        
+
+        if os.path.exists(
+            OFFSET_FILE
+        ):
+
+            with open(
+                OFFSET_FILE,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                return int(
+                    f.read().strip()
+                )
+
+    except Exception:
+        pass
+
+    return 0
+
+
+def save_offset(offset):
+
+    try:
+
+        with open(
+            OFFSET_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            f.write(
+                str(offset)
+            )
+
     except Exception as e:
-        print(f"❌ Ошибка канала статистики: {e}", flush=True)
+
+        print(
+            f"⚠️ Ошибка сохранения offset: {e}",
+            flush=True
+        )
 
 
-# ==================================================
-# UPDATE PREDICTION STATUS
-# ==================================================
+# =====================================================================
+# PREDICTIONS JSON
+# =====================================================================
 
-def update_prediction_status(entry, success, found=None):
-    message_id = entry.get("message_id")
-    original_text = entry.get("original_text", "")
-    if not message_id or not original_text:
-        return
-    
-    lines = original_text.split("\n")
-    target = entry.get("target_number")
-    
-    if success:
-        lines[0] = f"🎯 <b>Игра: #N{target} ✅</b>"
-        if found and found.get("is_opposite"):
-            lines.append("")
-            lines.append(f"✅ ЗАШЛО: #N{found['num']}")
-            lines.append(f"🃏 Выпало: {found['card']} 🔄")
-            lines.append(f"🔁 Догон: {found['dogon']}")
-            lines.append("⚡ Противоположная масть")
+def load_predictions():
+
+    global predictions
+
+    try:
+
+        if not os.path.exists(
+            PREDICTIONS_FILE
+        ):
+
+            predictions = []
+            return
+
+        with open(
+            PREDICTIONS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            data = json.load(f)
+
+        if isinstance(
+            data,
+            list
+        ):
+
+            predictions = data
+
         else:
-            lines.append("")
-            lines.append(f"✅ ЗАШЛО: #N{found['num']}")
-            lines.append(f"🃏 Выпало: {found['card']}")
-            lines.append(f"🔁 Догон: {found['dogon']}")
+
+            predictions = []
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Ошибка чтения "
+            f"{PREDICTIONS_FILE}: {e}",
+            flush=True
+        )
+
+        predictions = []
+
+
+def save_predictions():
+
+    try:
+
+        tmp = (
+            PREDICTIONS_FILE
+            + ".tmp"
+        )
+
+        with open(
+            tmp,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                predictions,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        os.replace(
+            tmp,
+            PREDICTIONS_FILE
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Ошибка сохранения "
+            f"прогнозов: {e}",
+            flush=True
+        )
+
+
+# =====================================================================
+# TELEGRAM SEND
+# =====================================================================
+
+def telegram_send(text):
+
+    try:
+
+        response = SESSION.post(
+            f"{TELEGRAM_API}/sendMessage",
+
+            json={
+                "chat_id": CHANNEL_PROGNOZ,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+
+            timeout=10,
+        )
+
+        data = response.json()
+
+        if data.get("ok"):
+
+            return data[
+                "result"
+            ][
+                "message_id"
+            ]
+
+        print(
+            f"❌ Telegram sendMessage: {data}",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Ошибка отправки Telegram: {e}",
+            flush=True
+        )
+
+    return None
+
+
+def telegram_edit(
+    message_id,
+    text
+):
+
+    if not message_id:
+        return False
+
+    try:
+
+        response = SESSION.post(
+            f"{TELEGRAM_API}/editMessageText",
+
+            json={
+                "chat_id": CHANNEL_PROGNOZ,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "HTML",
+            },
+
+            timeout=10,
+        )
+
+        return bool(
+            response.json().get(
+                "ok"
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Ошибка редактирования Telegram: {e}",
+            flush=True
+        )
+
+    return False
+
+
+# =====================================================================
+# GAME NUMBER
+# =====================================================================
+
+def add_game_offset(
+    number,
+    offset
+):
+
+    return (
+        (
+            int(number)
+            - 1
+            + int(offset)
+        )
+        % 1440
+    ) + 1
+
+
+# =====================================================================
+# ALGORITHM: ЕДИНИЦА
+# =====================================================================
+
+def get_unit_prediction(game):
+    """
+    Алгоритм "Единица".
+
+    Первая карта Player обязательно цифра:
+        6 -> J
+        7 -> Q
+        8 -> K
+        9 -> A
+
+    Масти по количеству карт Dealer:
+        2 -> ♥️♣️
+        3 -> ♦️♠️
+        4 -> ♥️♣️
+        5 -> ♦️♠️
+
+    Расстояние до цели:
+        2 карты -> +3
+        3 карты -> +4
+        4 карты -> +5
+        5 карт -> +6
+
+    Для алгоритма "Единица" первая карта Dealer
+    и третья карта Player не являются условиями.
+    """
+
+    player = game.get("player_cards", [])
+
+    if len(player) < 1:
+        return None
+
+    if game.get("is_draw"):
+        return None
+
+    if game.get("player_score") == 21:
+        return None
+
+    if game.get("dealer_score") == 21:
+        return None
+
+    first_player_rank = normalize_rank(player[0].get("rank"))
+
+    rank_mapping = {
+        "6": "J",
+        "7": "Q",
+        "8": "K",
+        "9": "A",
+    }
+
+    predicted_rank = rank_mapping.get(first_player_rank)
+    if not predicted_rank:
+        return None
+
+    suit_pairs = {
+        2: ["♥️", "♣️"],
+        3: ["♦️", "♠️"],
+        4: ["♥️", "♣️"],
+        5: ["♦️", "♠️"],
+    }
+
+    dealer = game.get("dealer_cards", [])
+    dealer_count = len(dealer)
+    predicted_suits = suit_pairs.get(dealer_count)
+    if not predicted_suits:
+        return None
+
+    player_count = len(player)
+    target_offset = player_count + 1
+
+    predicted_cards = [
+        f"{predicted_rank}{predicted_suits[0]}",
+        f"{predicted_rank}{predicted_suits[1]}",
+    ]
+
+    return {
+        "algorithm": "единица",
+        "trigger_number": game["game_number"],
+        "trigger_game_id": game.get("game_id"),
+        "target_number": add_game_offset(game["game_number"], target_offset),
+        "target_offset": target_offset,
+        "predicted_rank": predicted_rank,
+        "predicted_suits": predicted_suits,
+        "predicted_cards": predicted_cards,
+        "trigger_player": [card_to_text(c) for c in player],
+        "trigger_dealer": [card_to_text(c) for c in game.get("dealer_cards", [])],
+        "trigger_player_score": game["player_score"],
+        "trigger_dealer_score": game["dealer_score"],
+        "status": "pending",
+        "created_at": datetime.now(MOSCOW_TZ).isoformat(),
+        "result_game": None,
+        "found_card": None,
+        "dogon": None,
+        "message_id": None,
+    }
+
+
+# =====================================================================
+# TRIGGERS / CREATE PREDICTION
+# =====================================================================
+
+def get_algorithm_predictions(game):
+    prediction = get_unit_prediction(game)
+    return [prediction] if prediction else []
+
+# =====================================================================
+# PREDICTION MESSAGE
+# =====================================================================
+
+def make_prediction_message(prediction):
+    cards = prediction["predicted_cards"]
+    algorithm = prediction.get("algorithm", "повторение")
+    target_offset = prediction.get("target_offset", FORECAST_OFFSET)
+
+    return (
+        f"🔮 <b>ТОЧНАЯ КАРТА</b>\n\n"
+        f"🧠 Алгоритм: <b>{algorithm}</b>\n"
+        f"🎯 Игра: <b>#N{prediction['target_number']}</b>\n"
+        f"🃏 <b>{cards[0]}</b>\n"
+        f"🃏 <b>{cards[1]}</b>\n\n"
+        f"⏩ Прогноз: <b>+{target_offset}</b>\n"
+        f"🔄 Догон: <b>{DOGON_GAMES}</b>"
+    )
+
+
+# =====================================================================
+# CREATE PREDICTIONS
+# =====================================================================
+
+def create_predictions(game):
+    game_number = game["game_number"]
+
+    for prediction in get_algorithm_predictions(game):
+        algorithm = prediction["algorithm"]
+        trigger_key = (algorithm, game_number)
+
+        if trigger_key in processed_triggers:
+            continue
+
+        target_number = prediction["target_number"]
+
+        # Не создаём второй активный прогноз на ту же целевую игру
+        # внутри ОДНОГО алгоритма. Разные алгоритмы могут иметь одну цель.
+        already_exists = any(
+            entry.get("algorithm") == algorithm
+            and entry.get("target_number") == target_number
+            and entry.get("status") == "pending"
+            for entry in predictions
+        )
+
+        if already_exists:
+            processed_triggers.add(trigger_key)
+            continue
+
+        message = make_prediction_message(prediction)
+        message_id = telegram_send(message)
+
+        if not message_id:
+            print(
+                f"❌ Прогноз не отправлен — алгоритм {algorithm}, "
+                f"триггер #N{game_number}",
+                flush=True,
+            )
+            continue
+
+        prediction["message_id"] = message_id
+        predictions.append(prediction)
+        processed_triggers.add(trigger_key)
+        save_predictions()
+
+        print("", flush=True)
+        print("🔮 ПРОГНОЗ СОЗДАН", flush=True)
+        print(f"🧠 Алгоритм: {algorithm}", flush=True)
+        print(f"🎯 Цель: #N{target_number}", flush=True)
+        print(f"🃏 {prediction['predicted_cards'][0]}", flush=True)
+        print(f"🃏 {prediction['predicted_cards'][1]}", flush=True)
+        print(f"📌 Триггер: #N{game_number}", flush=True)
+
+
+def create_prediction(game):
+    """Совместимый вызов: создаёт прогноз алгоритма "Единица"."""
+    create_predictions(game)
+
+
+# =====================================================================
+# CHECK PLAYER CARD
+# =====================================================================
+
+def check_prediction_cards(
+    game,
+    predicted_cards
+):
+    """
+    Проверяем Player И Dealer.
+
+    Если прогнозируемая карта найдена
+    у Player ИЛИ у Dealer — сразу PLUS.
+    """
+
+    player_cards = game.get(
+        "player_cards",
+        []
+    )
+
+    dealer_cards = game.get(
+        "dealer_cards",
+        []
+    )
+
+    actual_cards = []
+
+    for card in player_cards + dealer_cards:
+
+        text = card_to_text(
+            card
+        )
+
+        if text:
+            actual_cards.append(
+                text
+            )
+
+    for predicted in predicted_cards:
+
+        if predicted in actual_cards:
+
+            return predicted
+
+    return None
+
+
+# =====================================================================
+# RESULT MESSAGE
+# =====================================================================
+
+def make_result_message(
+    prediction,
+    result,
+    result_game,
+    dogon
+):
+
+    target = prediction[
+        "target_number"
+    ]
+
+    lines = [
+
+        (
+            f"🎯 Игра: "
+            f"<b>#N{target}</b> "
+            f"{'✅' if result == 'win' else '❌'}"
+        ),
+        (
+            f"🧠 Алгоритм: "
+            f"<b>{prediction.get('algorithm', 'повторение')}</b>"
+        ),
+
+        "",
+
+        (
+            f"🃏 Прогноз: "
+            f"<b>{prediction['predicted_cards'][0]}</b> / "
+            f"<b>{prediction['predicted_cards'][1]}</b>"
+        ),
+    ]
+
+    if result == "win":
+
+        lines.extend([
+
+            "",
+
+            "✅ <b>PLUS</b>",
+
+            (
+                f"🎯 Результат: "
+                f"<b>#N{result_game}</b>"
+            ),
+
+            (
+                f"🃏 Карта: "
+                f"<b>{prediction['found_card']}</b>"
+            ),
+
+            (
+                f"🔄 Догон: "
+                f"<b>{dogon}</b>"
+            ),
+        ])
+
     else:
-        lines[0] = f"🎯 <b>Игра: #N{target} ❌</b>"
-        lines.append("")
-        lines.append(f"❌ Не зашло за {DOGON_GAMES + 1} игр")
-    
-    telegram_edit(message_id, "\n".join(lines))
+
+        lines.extend([
+
+            "",
+
+            "❌ <b>МИНУС</b>",
+
+            (
+                f"🏁 Проверены игры: "
+                f"#N{target} + "
+                f"{DOGON_GAMES} догонов"
+            ),
+        ])
+
+    return "\n".join(
+        lines
+    )
 
 
-# ==================================================
-# CHECK PREDICTIONS (С ПРОТИВОПОЛОЖНОЙ МАСТЬЮ)
-# ==================================================
+# =====================================================================
+# CHECK PREDICTIONS
+# =====================================================================
 
 def check_predictions():
-    global predictions
+    """
+    ГЛАВНОЕ ПРАВИЛО ПРОВЕРКИ:
+
+    Отсутствие игры в games_cache
+    НЕ означает минус.
+
+    Прогноз:
+
+        #N948
+        #N949
+        #N950
+        #N951
+        #N952
+
+    проверяется строго последовательно.
+
+    Если #N948 ещё нет:
+        ЖДЁМ.
+
+    Если #N948 есть:
+        проверяем.
+
+    Если карты нет:
+        ждём #N949.
+
+    И так далее.
+
+    Минус только тогда, когда ВСЕ
+    5 игр реально появились и были
+    зафиксированы.
+    """
+
     changed = False
-    
-    for entry in predictions:
-        if entry.get("status") != "pending":
+
+    for prediction in predictions:
+
+        if prediction.get(
+            "status"
+        ) != "pending":
+
             continue
-        
-        target = entry.get("target_number")
-        predicted_card = entry.get("predicted_card")
-        
-        if not target or not predicted_card:
+
+        target = prediction.get(
+            "target_number"
+        )
+
+        if not target:
             continue
-        
-        card_match = re.match(r"(10|[2-9AJQK])([♠♣♦♥])", predicted_card)
-        if not card_match:
+
+        predicted_cards = prediction.get(
+            "predicted_cards",
+            []
+        )
+
+        if not predicted_cards:
             continue
-        
-        predicted_rank = card_match.group(1)
-        predicted_suit = card_match.group(2)
-        
-        opposite_suit = get_opposite_suit(predicted_suit)
-        opposite_card = f"{predicted_rank}{opposite_suit}"
-        
-        found = None
-        all_available = True
-        
-        for dogon in range(DOGON_GAMES + 1):
-            check_number = int(target) + dogon
-            game = statistics_games.get(int(check_number))
-            
+
+        # =============================================================
+        # ПРОВЕРЯЕМ СТРОГО ПО ПОРЯДКУ
+        # =============================================================
+
+        all_games_checked = True
+
+        for dogon in range(
+            0,
+            DOGON_GAMES + 1
+        ):
+
+            game_number = add_game_offset(
+                target,
+                dogon
+            )
+
+            game = games_cache.get(
+                game_number
+            )
+
+            # =========================================================
+            # ИГРА ЕЩЁ НЕ ПОЯВИЛАСЬ
+            # =========================================================
+
             if not game:
-                all_available = False
+
+                all_games_checked = False
+
+                print(
+                    f"⏳ #N{target}: "
+                    f"ждём #N{game_number} "
+                    f"(догон {dogon})",
+                    flush=True
+                )
+
+                # ВАЖНО:
+                #
+                # Никакого MINUS.
+                # Никакого перехода через отсутствующую игру.
+                #
+                # Ждём именно эту игру.
                 break
-            
-            actual_cards = game.get("player_cards", []) + game.get("dealer_cards", [])
-            
-            if predicted_card in actual_cards or opposite_card in actual_cards:
-                found_card = predicted_card if predicted_card in actual_cards else opposite_card
-                found = {
-                    "num": check_number,
-                    "dogon": dogon,
-                    "card": found_card,
-                    "is_opposite": found_card == opposite_card
-                }
+
+            # =========================================================
+            # ИГРА ЕСТЬ — ПРОВЕРЯЕМ PLAYER
+            # =========================================================
+
+            found_card = check_prediction_cards(
+                game,
+                predicted_cards
+            )
+
+            if found_card:
+
+                prediction[
+                    "status"
+                ] = "win"
+
+                prediction[
+                    "result_game"
+                ] = game_number
+
+                prediction[
+                    "found_card"
+                ] = found_card
+
+                prediction[
+                    "dogon"
+                ] = dogon
+
+                new_message = make_result_message(
+                    prediction,
+                    "win",
+                    game_number,
+                    dogon
+                )
+
+                telegram_edit(
+                    prediction.get(
+                        "message_id"
+                    ),
+                    new_message
+                )
+
+                print(
+                    "",
+                    flush=True
+                )
+
+                print(
+                    f"✅ PLUS #N{target}",
+                    flush=True
+                )
+
+                print(
+                    f"🎯 Карта "
+                    f"{found_card} "
+                    f"найдена у Player "
+                    f"в #N{game_number}",
+                    flush=True
+                )
+
+                print(
+                    f"🔄 Догон: {dogon}",
+                    flush=True
+                )
+
+                changed = True
+
+                # Прогноз закрыт.
+                all_games_checked = False
+
                 break
-        
-        if found:
-            entry["status"] = "win"
-            entry["result_game"] = found["num"]
-            entry["found_card"] = found["card"]
-            entry["current_dogon"] = found["dogon"]
-            changed = True
-            
-            print(f"✅ Прогноз #N{target} ЗАШЁЛ на #N{found['num']} (догон {found['dogon']})", flush=True)
-            if found.get("is_opposite"):
-                print(f"🔄 Выпала противоположная масть: {found['card']} (прогноз был {predicted_card})", flush=True)
-            
-            update_prediction_status(entry, True, found)
+
+            # =========================================================
+            # КАРТЫ НЕТ
+            # =========================================================
+
+            if game.get(
+                "is_draw"
+            ):
+
+                print(
+                    f"🔰 #N{game_number} — "
+                    f"#X, нужной карты нет → "
+                    f"переходим к следующему",
+                    flush=True
+                )
+
+            elif (
+                game.get(
+                    "player_score"
+                ) == 21
+
+                or
+
+                game.get(
+                    "dealer_score"
+                ) == 21
+            ):
+
+                print(
+                    f"21 в #N{game_number}, "
+                    f"нужной карты нет → "
+                    f"переходим к следующему",
+                    flush=True
+                )
+
+            else:
+
+                print(
+                    f"🔍 #N{game_number} — "
+                    f"нужной карты нет → "
+                    f"переходим к следующему",
+                    flush=True
+                )
+
+        # =============================================================
+        # НЕ ВСЕ ИГРЫ ЕЩЁ ПОЛУЧЕНЫ
+        # =============================================================
+
+        if not all_games_checked:
+
             continue
-        
-        if not all_available:
-            continue
-        
-        entry["status"] = "lose"
-        entry["current_dogon"] = DOGON_GAMES
+
+        # =============================================================
+        # СЮДА ПОПАДАЕМ ТОЛЬКО ЕСЛИ:
+        #
+        # #N948 есть
+        # #N949 есть
+        # #N950 есть
+        # #N951 есть
+        # #N952 есть
+        #
+        # И НИ В ОДНОЙ НЕТ НУЖНОЙ КАРТЫ.
+        # =============================================================
+
+        prediction[
+            "status"
+        ] = "lose"
+
+        prediction[
+            "result_game"
+        ] = add_game_offset(
+            target,
+            DOGON_GAMES
+        )
+
+        prediction[
+            "dogon"
+        ] = DOGON_GAMES
+
+        new_message = make_result_message(
+            prediction,
+            "lose",
+            target,
+            DOGON_GAMES
+        )
+
+        telegram_edit(
+            prediction.get(
+                "message_id"
+            ),
+            new_message
+        )
+
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            f"❌ MINUS #N{target}",
+            flush=True
+        )
+
+        print(
+            f"🏁 Реально проверены "
+            f"все игры "
+            f"#N{target} — "
+            f"#N{add_game_offset(target, DOGON_GAMES)}",
+            flush=True
+        )
+
         changed = True
-        print(f"❌ Прогноз #N{target} НЕ ЗАШЁЛ", flush=True)
-        update_prediction_status(entry, False)
-    
+
     if changed:
         save_predictions()
 
 
-# ==================================================
-# PROCESS ACTIVE GAMES
-# ==================================================
+# =====================================================================
+# FINALIZE PENDING GAMES
+# =====================================================================
 
-def update_active_game(game_id):
-    data = get_game_data(game_id)
-    if not data:
-        return None
-    parsed = parse_api_game(game_id, data)
-    if parsed:
-        active_games_cache[str(game_id)] = parsed
-    return parsed
+def finalize_pending_games():
 
+    now = time.time()
 
-def process_active_games():
-    global processed_games
-    active_games = get_active_games()
-    if not active_games:
-        return
-    current_ids = set()
-    for game_info in active_games:
-        game_id = str(game_info.get("id"))
-        if not game_id or game_id in processed_games:
-            continue
-        current_ids.add(game_id)
-        parsed = update_active_game(game_id)
-        if not parsed:
-            continue
-        if is_game_finished(
-            parsed.get("state"),
-            parsed.get("player_cards", []),
-            parsed.get("dealer_cards", []),
-            parsed.get("player_score", 0),
-            parsed.get("dealer_score", 0)
+    ready = []
+
+    for game_number, info in list(
+        pending_games.items()
+    ):
+
+        first_seen = info.get(
+            "first_seen",
+            now
+        )
+
+        if (
+            now - first_seen
+            >= FINALIZE_WAIT_SECONDS
         ):
-            print(f"💾 Игра завершена: #N{parsed['game_number']} | {parsed['player_cards']} vs {parsed['dealer_cards']}", flush=True)
-            create_trigger_predictions(parsed)
-            processed_games.add(game_id)
-            active_games_cache.pop(game_id, None)
-    for game_id in list(active_games_cache.keys()):
-        if game_id in processed_games or game_id in current_ids:
+
+            ready.append(
+                game_number
+            )
+
+    for game_number in ready:
+
+        info = pending_games.pop(
+            game_number,
+            None
+        )
+
+        if not info:
             continue
-        parsed = update_active_game(game_id)
-        if not parsed:
+
+        text = info.get(
+            "text",
+            ""
+        )
+
+        game = parse_game_message(
+            text
+        )
+
+        if not game:
+
+            print(
+                f"⚠️ #N{game_number} "
+                f"не удалось разобрать "
+                f"после 30 секунд",
+                flush=True
+            )
+
             continue
-        if is_game_finished(
-            parsed.get("state"),
-            parsed.get("player_cards", []),
-            parsed.get("dealer_cards", []),
-            parsed.get("player_score", 0),
-            parsed.get("dealer_score", 0)
-        ):
-            print(f"💾 Игра завершена: #N{parsed['game_number']} | {parsed['player_cards']} vs {parsed['dealer_cards']}", flush=True)
-            create_trigger_predictions(parsed)
-            processed_games.add(game_id)
-            active_games_cache.pop(game_id, None)
+
+        games_cache[
+            game_number
+        ] = game
+
+        log_game(
+            game
+        )
+
+        create_prediction(
+            game
+        )
 
 
-# ==================================================
+# =====================================================================
+# TELEGRAM UPDATES
+# =====================================================================
+
+def process_telegram_updates(
+    offset
+):
+
+    try:
+
+        response = SESSION.get(
+
+            f"{TELEGRAM_API}/getUpdates",
+
+            params={
+                "offset": offset,
+                "timeout": 3,
+                "limit": 50,
+
+                "allowed_updates":
+                    json.dumps([
+                        "channel_post",
+                        "edited_channel_post"
+                    ]),
+            },
+
+            timeout=10,
+        )
+
+        data = response.json()
+
+        if not data.get("ok"):
+
+            print(
+                f"❌ Telegram getUpdates: "
+                f"{data}",
+                flush=True
+            )
+
+            return offset
+
+        updates = data.get(
+            "result",
+            []
+        )
+
+        for update in updates:
+
+            update_id = update.get(
+                "update_id"
+            )
+
+            if update_id is not None:
+
+                offset = (
+                    update_id + 1
+                )
+
+                save_offset(
+                    offset
+                )
+
+            post = (
+                update.get(
+                    "channel_post"
+                )
+                or
+                update.get(
+                    "edited_channel_post"
+                )
+            )
+
+            if not post:
+                continue
+
+            chat = post.get(
+                "chat",
+                {}
+            )
+
+            chat_id = str(
+                chat.get(
+                    "id",
+                    ""
+                )
+            )
+
+            if chat_id != str(
+                CHANNEL_STATS
+            ):
+
+                continue
+
+            text = post.get(
+                "text",
+                ""
+            )
+
+            if not text:
+                continue
+
+            number_match = re.search(
+                r"#N(\d+)",
+                text
+            )
+
+            if not number_match:
+                continue
+
+            game_number = int(
+                number_match.group(1)
+            )
+
+            # =========================================================
+            # Сначала пробуем разобрать игру.
+            # =========================================================
+
+            game = parse_game_message(
+                text
+            )
+
+            # =========================================================
+            # Если игра уже ожидает финализации,
+            # обновляем её последней версией.
+            # =========================================================
+
+            if game_number in pending_games:
+
+                pending_games[
+                    game_number
+                ]["text"] = text
+
+                print(
+                    f"🔄 Обновлена игра "
+                    f"#N{game_number} "
+                    f"до окончания "
+                    f"{FINALIZE_WAIT_SECONDS} секунд",
+                    flush=True
+                )
+
+                continue
+
+            # =========================================================
+            # Если игра уже зафиксирована,
+            # обновляем её в кэше.
+            # =========================================================
+
+            if game_number in games_cache:
+
+                if game:
+
+                    games_cache[
+                        game_number
+                    ] = game
+
+                    print(
+                        f"🔄 Обновлена "
+                        f"завершённая "
+                        f"игра #N{game_number}",
+                        flush=True
+                    )
+
+                continue
+
+            # =========================================================
+            # Новая завершённая игра.
+            # =========================================================
+
+            if re.search(
+                r"[✅🔰]",
+                text
+            ):
+
+                if game_number in processed_triggers:
+                    continue
+
+                pending_games[
+                    game_number
+                ] = {
+
+                    "first_seen":
+                        time.time(),
+
+                    "text":
+                        text,
+                }
+
+                print(
+                    "",
+                    flush=True
+                )
+
+                print(
+                    f"👀 НОВАЯ ИГРА "
+                    f"#N{game_number}",
+                    flush=True
+                )
+
+                print(
+                    "⏳ Увидели завершение — "
+                    f"ждём "
+                    f"{FINALIZE_WAIT_SECONDS} секунд",
+                    flush=True
+                )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ Updates error: {e}",
+            flush=True
+        )
+
+    return offset
+
+
+# =====================================================================
 # CLEANUP
-# ==================================================
+# =====================================================================
 
-def cleanup():
-    global predictions, processed_games, statistics_games
-    if len(predictions) > MAX_PREDICTIONS:
-        predictions = predictions[-MAX_PREDICTIONS:]
+def cleanup_games_cache():
+
+    if len(games_cache) <= 100:
+        return
+
+    numbers = sorted(
+        games_cache.keys()
+    )
+
+    keep = numbers[-100:]
+
+    keep_set = set(
+        keep
+    )
+
+    for number in list(
+        games_cache.keys()
+    ):
+
+        if number not in keep_set:
+
+            del games_cache[
+                number
+            ]
+
+
+def cleanup_predictions():
+
+    global predictions
+
+    if len(predictions) > 1000:
+
+        predictions = predictions[
+            -1000:
+        ]
+
         save_predictions()
-    if len(processed_games) > 2000:
-        processed_games = set(list(processed_games)[-1000:])
-    if len(statistics_games) > 500:
-        keys = sorted(statistics_games.keys())[:-300]
-        for key in keys:
-            statistics_games.pop(key, None)
 
 
-# ==================================================
+# =====================================================================
 # MAIN
-# ==================================================
+# =====================================================================
 
 def main():
-    global predictions, telegram_update_offset
-    
-    print("🚀 БОТ ЗАПУЩЕН", flush=True)
-    print(f"📊 Канал статистики: {CHANNEL_STATISTICS}", flush=True)
-    print(f"🎯 Канал прогнозов: {CHANNEL_PROGNOZ}", flush=True)
-    print("=" * 50, flush=True)
-    
-    predictions = load_predictions()
-    telegram_update_offset = load_telegram_offset()
-    
-    print(f"🔮 Загружено прогнозов: {len(predictions)}", flush=True)
-    print("🤖 Бот работает...", flush=True)
-    
-    while True:
-        started = time.time()
-        try:
-            fetch_statistics_channel()
-            process_active_games()
-            check_predictions()
-            cleanup()
-            sleep_time = max(0.2, POLL_INTERVAL - (time.time() - started))
-            time.sleep(sleep_time)
-        except KeyboardInterrupt:
-            print("\n🛑 Бот остановлен", flush=True)
-            break
-        except Exception as e:
-            print(f"❌ Ошибка: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            time.sleep(3)
 
+    global telegram_offset
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "==================================================",
+        flush=True
+    )
+
+    print(
+        "🚀 CYBER 21 — TELEGRAM STATS FORECAST",
+        flush=True
+    )
+
+    print(
+        "==================================================",
+        flush=True
+    )
+
+    print(
+        "📡 Игры: CHANNEL_STATS",
+        flush=True
+    )
+
+    print(
+        f"⏳ Финализация: "
+        f"{FINALIZE_WAIT_SECONDS} сек",
+        flush=True
+    )
+
+    print(
+        f"🎯 Смещение прогноза: "
+        f"+{FORECAST_OFFSET}",
+        flush=True
+    )
+
+    print(
+        f"🔄 Догонов: "
+        f"{DOGON_GAMES}",
+        flush=True
+    )
+
+    print(
+        "🧮 Cyber 21: "
+        "6-10 = номинал, "
+        "J=2, Q=3, K=4, A=11",
+        flush=True
+    )
+
+    print(
+        "==================================================",
+        flush=True
+    )
+
+    load_predictions()
+
+    telegram_offset = load_offset()
+
+    print(
+        f"📌 Telegram offset: "
+        f"{telegram_offset}",
+        flush=True
+    )
+
+    print(
+        f"📊 Загружено прогнозов: "
+        f"{len(predictions)}",
+        flush=True
+    )
+
+    print(
+        "==================================================",
+        flush=True
+    )
+
+    while True:
+
+        try:
+
+            # ---------------------------------------------------------
+            # 1. Получаем новые игры.
+            # ---------------------------------------------------------
+
+            telegram_offset = (
+                process_telegram_updates(
+                    telegram_offset
+                )
+            )
+
+            # ---------------------------------------------------------
+            # 2. Финализируем игры после 30 секунд.
+            # ---------------------------------------------------------
+
+            finalize_pending_games()
+
+            # ---------------------------------------------------------
+            # 3. Проверяем прогнозы.
+            # ---------------------------------------------------------
+
+            check_predictions()
+
+            # ---------------------------------------------------------
+            # 4. Очистка.
+            # ---------------------------------------------------------
+
+            cleanup_games_cache()
+
+            cleanup_predictions()
+
+            time.sleep(
+                POLL_INTERVAL
+            )
+
+        except KeyboardInterrupt:
+
+            print(
+                "\n🛑 Бот остановлен",
+                flush=True
+            )
+
+            break
+
+        except Exception as e:
+
+            print(
+                f"❌ Критическая ошибка: {e}",
+                flush=True
+            )
+
+            time.sleep(
+                3
+            )
+
+
+# =====================================================================
+# START
+# =====================================================================
 
 if __name__ == "__main__":
     main()
