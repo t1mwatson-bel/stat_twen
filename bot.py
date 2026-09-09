@@ -760,7 +760,6 @@ def get_unit_prediction(game):
         "dogon": None,
         "message_id": None,
     }
-}
 
 
 # =====================================================================
