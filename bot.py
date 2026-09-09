@@ -664,10 +664,10 @@ def get_unit_prediction(game):
         5 -> ♦️♠️
 
     Расстояние до цели:
-        2 карты -> +2
-        3 карты -> +3
-        4 карты -> +4
-        5 карт -> +5
+        2 карты -> +3
+        3 карты -> +4
+        4 карты -> +5
+        5 карт -> +6
 
     Для алгоритма "Единица" первая карта Dealer
     и третья карта Player не являются условиями.
@@ -709,6 +709,7 @@ def get_unit_prediction(game):
 
     dealer = game.get("dealer_cards", [])
     dealer_count = len(dealer)
+
     predicted_suits = suit_pairs.get(dealer_count)
     if not predicted_suits:
         return None
@@ -720,6 +721,24 @@ def get_unit_prediction(game):
         f"{predicted_rank}{predicted_suits[0]}",
         f"{predicted_rank}{predicted_suits[1]}",
     ]
+
+    # Если прогнозируемая карта уже есть в триггерной игре
+    # у Player или Dealer — прогноз не даём.
+    trigger_cards = []
+
+    for card in player:
+        text = card_to_text(card)
+        if text:
+            trigger_cards.append(text)
+
+    for card in dealer:
+        text = card_to_text(card)
+        if text:
+            trigger_cards.append(text)
+
+    for predicted_card in predicted_cards:
+        if predicted_card in trigger_cards:
+            return None
 
     return {
         "algorithm": "единица",
@@ -741,6 +760,7 @@ def get_unit_prediction(game):
         "dogon": None,
         "message_id": None,
     }
+}
 
 
 # =====================================================================
