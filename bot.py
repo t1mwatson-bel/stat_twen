@@ -713,7 +713,7 @@ def get_unit_prediction(game):
     if not predicted_suits:
         return None
 
-    player_count = len(player)
+    player_count = len(dealer)
     target_offset = player_count + 1
 
     predicted_cards = [
