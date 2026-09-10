@@ -674,8 +674,14 @@ def get_unit_prediction(game):
     """
 
     player = game.get("player_cards", [])
+    dealer = game.get("dealer_cards", [])
 
-    if len(player) < 1:
+    if len(player) < 1 or len(dealer) < 1:
+        return None
+
+    # Если в триггерной игре у Player ИЛИ у Dealer 2 карты —
+    # прогноз не создаём.
+    if len(player) == 2 or len(dealer) == 2:
         return None
 
     if game.get("is_draw"):
@@ -687,7 +693,9 @@ def get_unit_prediction(game):
     if game.get("dealer_score") == 21:
         return None
 
-    first_player_rank = normalize_rank(player[0].get("rank"))
+    first_player_rank = normalize_rank(
+        player[0].get("rank")
+    )
 
     rank_mapping = {
         "6": "J",
@@ -696,25 +704,30 @@ def get_unit_prediction(game):
         "9": "A",
     }
 
-    predicted_rank = rank_mapping.get(first_player_rank)
+    predicted_rank = rank_mapping.get(
+        first_player_rank
+    )
+
     if not predicted_rank:
         return None
 
     suit_pairs = {
-        2: ["♥️", "♣️"],
-        3: ["♦️", "♠️"],
-        4: ["♥️", "♣️"],
-        5: ["♦️", "♠️"],
+        2: ["♠️", "♦️"],
+        3: ["♥️", "♣️"],
+        4: ["♦️", "♠️"],
+        5: ["♣️", "♥️"],
     }
 
-    dealer = game.get("dealer_cards", [])
     dealer_count = len(dealer)
 
-    predicted_suits = suit_pairs.get(dealer_count)
+    predicted_suits = suit_pairs.get(
+        dealer_count
+    )
+
     if not predicted_suits:
         return None
 
-    player_count = len(dealer)
+    player_count = len(player)
     target_offset = player_count + 1
 
     predicted_cards = [
@@ -722,21 +735,25 @@ def get_unit_prediction(game):
         f"{predicted_rank}{predicted_suits[1]}",
     ]
 
-    # Если прогнозируемая карта уже есть в триггерной игре
-    # у Player или Dealer — прогноз не даём.
+    # Если прогнозируемая карта уже есть
+    # в триггерной игре у Player или Dealer —
+    # прогноз не даём.
     trigger_cards = []
 
     for card in player:
         text = card_to_text(card)
+
         if text:
             trigger_cards.append(text)
 
     for card in dealer:
         text = card_to_text(card)
+
         if text:
             trigger_cards.append(text)
 
     for predicted_card in predicted_cards:
+
         if predicted_card in trigger_cards:
             return None
 
@@ -744,17 +761,28 @@ def get_unit_prediction(game):
         "algorithm": "единица",
         "trigger_number": game["game_number"],
         "trigger_game_id": game.get("game_id"),
-        "target_number": add_game_offset(game["game_number"], target_offset),
+        "target_number": add_game_offset(
+            game["game_number"],
+            target_offset
+        ),
         "target_offset": target_offset,
         "predicted_rank": predicted_rank,
         "predicted_suits": predicted_suits,
         "predicted_cards": predicted_cards,
-        "trigger_player": [card_to_text(c) for c in player],
-        "trigger_dealer": [card_to_text(c) for c in game.get("dealer_cards", [])],
+        "trigger_player": [
+            card_to_text(c)
+            for c in player
+        ],
+        "trigger_dealer": [
+            card_to_text(c)
+            for c in dealer
+        ],
         "trigger_player_score": game["player_score"],
         "trigger_dealer_score": game["dealer_score"],
         "status": "pending",
-        "created_at": datetime.now(MOSCOW_TZ).isoformat(),
+        "created_at": datetime.now(
+            MOSCOW_TZ
+        ).isoformat(),
         "result_game": None,
         "found_card": None,
         "dogon": None,
