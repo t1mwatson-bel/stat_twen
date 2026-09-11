@@ -673,7 +673,7 @@ def get_unit_prediction(game):
     и третья карта Player не являются условиями.
     """
 
-        player = game.get("player_cards", [])
+    player = game.get("player_cards", [])
     dealer = game.get("dealer_cards", [])
 
     if len(player) < 1 or len(dealer) < 1:
