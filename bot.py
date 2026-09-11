@@ -728,7 +728,7 @@ def get_unit_prediction(game):
         return None
 
     player_count = len(dealer)
-    target_offset = player_count + 1
+    target_offset = len(player) + len(dealer) + 1
 
     predicted_cards = [
         f"{predicted_rank}{predicted_suits[0]}",
