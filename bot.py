@@ -676,8 +676,8 @@ def get_unit_prediction(game):
     player = game.get("player_cards", [])
     dealer = game.get("dealer_cards", [])
 
-    if len(player) < 1 or len(dealer) < 1:
-        return None
+if len(player) < 1 or len(dealer) < 1:
+    return None
 
     # Если в триггерной игре у Player ИЛИ у Dealer 2 карты —
     # прогноз не создаём.
