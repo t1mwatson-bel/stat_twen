@@ -163,8 +163,13 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
 
     # ✅ КИБЕР-ВЕРСИЯ: дилер добивает ДО ПОБЕДЫ ИЛИ ПЕРЕБОРА
     if state in ("2", "3"):
-        if dealer_cards and d_score <= 21:
+        # Если у дилера нет карт — игра ещё идёт
+        if not dealer_cards:
             return False
+        # Если у дилера есть карты и он не перебрал — продолжаем
+        if d_score <= 21:
+            return False
+        # Если у дилера перебор — завершаем
         return True
 
     # ✅ ПРОВЕРКА ПО ПЕРЕБОРУ
