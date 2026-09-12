@@ -122,7 +122,6 @@ def calculate_score(cards):
     if not cards:
         return 0
     
-    # Два туза = 21 (блэкджек)
     if len(cards) == 2 and all(c and c[0] == 'A' for c in cards):
         return 21
     
@@ -161,17 +160,11 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
             return True
         return False
 
-    # ✅ ИГРА ИДЁТ (state 2/3)
+    # ✅ КИБЕР-ВЕРСИЯ: дилер добивает ДО ПОБЕДЫ ИЛИ ПЕРЕБОРА
     if state in ("2", "3"):
-        if not dealer_cards:
+        if dealer_cards and d_score <= 21:
             return False
-        if d_score > 21:
-            return True
-        if len(player_cards) == 2 and len(dealer_cards) >= 2 and p_score <= 21:
-            return True
-        if d_score >= 20:
-            return True
-        return False
+        return True
 
     # ✅ ПРОВЕРКА ПО ПЕРЕБОРУ
     if dealer_cards and d_score > 21:
@@ -275,7 +268,6 @@ def monitor_active_games():
         if not sc:
             continue
         
-        # ===== ИЗВЛЕЧЕНИЕ НОМЕРА ИГРЫ ИЗ API =====
         raw_game_num = value.get("DI") or value.get("TN")
         if raw_game_num:
             match = re.search(r'\d+', str(raw_game_num))
@@ -285,7 +277,6 @@ def monitor_active_games():
                 game_num = get_game_number_fallback()
         else:
             game_num = get_game_number_fallback()
-        # ========================================
         
         player_cards = []
         dealer_cards = []
@@ -299,7 +290,6 @@ def monitor_active_games():
             elif item.get("Key") == "STATE":
                 state = item.get("Value")
         
-        # Ожидание
         if not player_cards and state == "0":
             if game_id not in game_numbers:
                 game_numbers[game_id] = game_num
@@ -357,7 +347,10 @@ def monitor_active_games():
                 messages[game_id] = msg_id
                 print(f"📤 Новая игра {game_id}: {msg}", flush=True)
         
-        if is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
+        finished = is_game_finished(state, player_cards, dealer_cards, p_score, d_score)
+        print(f"🔍 is_finished({game_id}): state={repr(state)}, p={p_score}, d={d_score}, len_p={len(player_cards)}, len_d={len(dealer_cards)}, finished={finished}", flush=True)
+        
+        if finished:
             processed_games.add(game_id)
             for d in (messages, game_numbers, player_cards_history, dealer_cards_history, game_state_history):
                 if game_id in d:
