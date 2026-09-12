@@ -163,20 +163,20 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
 
     # ✅ ИГРА ИДЁТ (state 2/3)
     if state in ("2", "3"):
-        # Если у дилера нет карт — игра ещё идёт
-        if not dealer_cards:
-            return False
-        # Если у дилера перебор — завершаем
-        if d_score > 21:
-            return True
-        # Если у ИГРОКА 2 карты и он остановился — игра завершается
-        if len(player_cards) == 2 and p_score <= 21:
-            return True
-        # Если у дилера 20+ — дилер остановился, завершаем
-        if d_score >= 20:
-            return True
-        # Иначе дилер продолжает добирать
+    # Если у дилера нет карт — игра ещё идёт
+    if not dealer_cards:
         return False
+    # Если у дилера перебор — завершаем
+    if d_score > 21:
+        return True
+    # Если у игрока 2 карты И у дилера 2+ карты — игра завершается (дилер остановился)
+    if len(player_cards) == 2 and len(dealer_cards) >= 2 and p_score <= 21:
+        return True
+    # Если у дилера 20+ — дилер остановился, завершаем
+    if d_score >= 20:
+        return True
+    # Иначе дилер продолжает добирать
+    return False
 
     # ✅ ПРОВЕРКА ПО ПЕРЕБОРУ
     if dealer_cards and d_score > 21:
