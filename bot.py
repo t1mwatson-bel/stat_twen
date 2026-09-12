@@ -26,7 +26,7 @@ print(f"✅ BOT_TOKEN: {BOT_TOKEN[:5]}...", flush=True)
 print(f"✅ CHAT_ID: {CHAT_ID}", flush=True)
 
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-BASE_URL = "https://1xlite-6021.pro"  # ← НОВОЕ ЗЕРКАЛО
+BASE_URL = "https://1xlite-6021.pro"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 messages = {}
@@ -42,11 +42,11 @@ RANKS = {2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9", 10: "10
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://1xlite-6021.pro/ru/live/twentyone/2092323-21-classics?platform_type=desktop",  # ← НОВАЯ ССЫЛКА
+    "Referer": f"{BASE_URL}/ru/live/twentyone/2092323-21-classics?platform_type=desktop",
     "Cookie": "platform_type=desktop; lng=ru; cookies_agree_type=3; tzo=3; is12h=0; referral_values=%7B%22type%22%3A%22reflinkid%22%2C%22val%22%3A%22s_50970m_355c_%22%2C%22additional%22%3A%7B%22name_tag%22%3A%22tag%22%7D%7D; reflinkid=s_50970m_355c_; auid=uaJb+WqQFLEHP+WbAwdUAg==; fatman_uuid=6dac517c-7199-1491-828a-723ace371af0; che_g=3741ad9b-2648-4e11-b16e-55cbdda04b42; SESSION=ae9f1b4deac37d41be6873b1acf03cf4; sh.session.id=1e645679-820b-4250-86f5-bf39161d311d; _ga=GA1.1.103981619.1787827389; _ym_uid=1787827389562709649; _ym_d=1787827389; _ym_isad=2; _ym_visorc=b; mdd=1; _ga_7JGWL9SV66=GS2.1.s1787827388$o1$g1$t1787827414$j34$l0$h1219464045; window_width=150"
 }
 
-print("✅ Настройки для обычной 21 загружены", flush=True)
+print("✅ Настройки для 21 Classic загружены", flush=True)
 
 def get_game_number_fallback():
     now = datetime.now(MOSCOW_TZ)
@@ -54,7 +54,7 @@ def get_game_number_fallback():
     if now < start:
         start = start - timedelta(days=1)
     diff_minutes = (now - start).total_seconds() / 60
-    return int(diff_minutes / 1) % 1440 + 1
+    return int(diff_minutes) % 1440 + 1
 
 def get_active_games():
     try:
@@ -85,7 +85,7 @@ def get_game_data(game_id):
     return None
 
 # ====================================================================
-# ФУНКЦИИ ПАРСИНГА КАРТ С ЦВЕТНЫМИ ЭМОДЗИ
+# ПАРСИНГ КАРТ
 # ====================================================================
 
 def get_cards(value_str):
@@ -135,9 +135,9 @@ def calculate_score(cards):
         elif card.startswith('7'): score += 7
         elif card.startswith('8'): score += 8
         elif card.startswith('9'): score += 9
-        elif card.startswith('J'): score += 2   # Валет = 2
-        elif card.startswith('Q'): score += 3   # Дама = 3
-        elif card.startswith('K'): score += 4   # Король = 4
+        elif card.startswith('J'): score += 2
+        elif card.startswith('Q'): score += 3
+        elif card.startswith('K'): score += 4
         elif card.startswith('A'): score += 11
     return score
 
@@ -161,21 +161,22 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
             return True
         return False
 
-    # ✅ КИБЕР-ВЕРСИЯ: дилер добивает ДО ПОБЕДЫ ИЛИ ПЕРЕБОРА
+    # ✅ ИГРА ИДЁТ (state 2/3)
     if state in ("2", "3"):
-    # Если у дилера нет карт — игра ещё идёт
-    if not dealer_cards:
-        return False
-    # Если у дилера перебор — завершаем
-    if d_score > 21:
-        return True
-    # Если у дилера 20 — дилер остановился, завершаем
-    if d_score >= 20:
-        return True
-    # Иначе дилер продолжает добирать
-    return False
+        # Если у дилера нет карт — игра ещё идёт
+        if not dealer_cards:
+            return False
         # Если у дилера перебор — завершаем
-        return True
+        if d_score > 21:
+            return True
+        # Если у ИГРОКА 2 карты и он остановился — игра завершается
+        if len(player_cards) == 2 and p_score <= 21:
+            return True
+        # Если у дилера 20+ — дилер остановился, завершаем
+        if d_score >= 20:
+            return True
+        # Иначе дилер продолжает добирать
+        return False
 
     # ✅ ПРОВЕРКА ПО ПЕРЕБОРУ
     if dealer_cards and d_score > 21:
@@ -279,7 +280,7 @@ def monitor_active_games():
         if not sc:
             continue
         
-        # ===== ИЗВЛЕЧЕНИЕ НОМЕРА ИГРЫ ИЗ API (DI или TN) =====
+        # ===== ИЗВЛЕЧЕНИЕ НОМЕРА ИГРЫ ИЗ API =====
         raw_game_num = value.get("DI") or value.get("TN")
         if raw_game_num:
             match = re.search(r'\d+', str(raw_game_num))
@@ -289,7 +290,7 @@ def monitor_active_games():
                 game_num = get_game_number_fallback()
         else:
             game_num = get_game_number_fallback()
-        # =====================================================
+        # ========================================
         
         player_cards = []
         dealer_cards = []
@@ -303,7 +304,7 @@ def monitor_active_games():
             elif item.get("Key") == "STATE":
                 state = item.get("Value")
         
-        # Если нет карт игрока и state=0 — отправляем "ожидание"
+        # Ожидание
         if not player_cards and state == "0":
             if game_id not in game_numbers:
                 game_numbers[game_id] = game_num
@@ -367,22 +368,10 @@ def monitor_active_games():
                 if game_id in d:
                     del d[game_id]
             print(f"🏁 Игра {game_id} завершена (state={state}, p_score={p_score}, d_score={d_score})", flush=True)
-        elif len(player_cards) == 2 and p_score == 21:
-            processed_games.add(game_id)
-            for d in (messages, game_numbers, player_cards_history, dealer_cards_history, game_state_history):
-                if game_id in d:
-                    del d[game_id]
-            print(f"🏁 Игра {game_id} принудительно завершена (BLACKJACK! p_score=21, state={state})", flush=True)
-        elif dealer_cards and len(dealer_cards) == 2 and d_score == 21:
-            processed_games.add(game_id)
-            for d in (messages, game_numbers, player_cards_history, dealer_cards_history, game_state_history):
-                if game_id in d:
-                    del d[game_id]
-            print(f"🏁 Игра {game_id} принудительно завершена (BLACKJACK! d_score=21, state={state})", flush=True)
 
 def main():
     global processed_games, messages, game_numbers, player_cards_history, dealer_cards_history, game_state_history
-    print("🔄 ПАРСЕР ОБЫЧНОЙ 21 ЗАПУЩЕН (ЛАЙВ-МОНИТОРИНГ)", flush=True)
+    print("🔄 ПАРСЕР 21 CLASSIC ЗАПУЩЕН (ЛАЙВ-МОНИТОРИНГ)", flush=True)
     print("⏱️ Мониторинг: каждые 10 секунд", flush=True)
     print("=" * 60, flush=True)
     
