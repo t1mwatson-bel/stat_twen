@@ -51,10 +51,15 @@ print("✅ Настройки для 21 Classic загружены", flush=True)
 # =====================================================================
 # СОХРАНЕНИЕ ЗАВЕРШЁННЫХ ИГР
 # =====================================================================
-LOG_FILE = 'classic21_games.json'
+LOG_FILE = 'classic21_games.txt'
 
-def save_finished_game(game_num, game_id, player_cards, dealer_cards, p_score, d_score, state):
-    """Сохраняет завершённую игру в файл classic21_games.json"""
+def save_finished_game(msg_text):
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(msg_text + '\n')
+        print(f"💾 Сохранено: {msg_text}", flush=True)
+    except Exception as e:
+        print(f"❌ Ошибка сохранения: {e}", flush=True)
     try:
         record = {
             "game_num": game_num,
