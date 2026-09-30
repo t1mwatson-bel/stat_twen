@@ -26,7 +26,9 @@ print(f"✅ BOT_TOKEN: {BOT_TOKEN[:5]}...", flush=True)
 print(f"✅ CHAT_ID: {CHAT_ID}", flush=True)
 
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-BASE_URL = "https://1xlite-6021.pro"
+
+# ⚠️ ИСПРАВЛЕНО: живое зеркало вместо мёртвого 1xlite-6021.pro
+BASE_URL = "https://1xlite-36553.pro"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 messages = {}
@@ -49,53 +51,9 @@ HEADERS = {
 print("✅ Настройки для 21 Classic загружены", flush=True)
 
 # =====================================================================
-# СОХРАНЕНИЕ ЗАВЕРШЁННЫХ ИГР
+# СОХРАНЕНИЕ ЗАВЕРШЁННЫХ ИГР — ОТКЛЮЧЕНО
 # =====================================================================
-LOG_FILE = 'classic21_games.txt'        # текстовый лог
-LOG_JSON = 'classic21_games.json'       # структурированный лог
-
-def save_finished_game(game_num, game_id, player_cards, dealer_cards, p_score, d_score, state):
-    # 1) Пишем человекочитаемую строку
-    msg_text = build_message(game_num, game_id, player_cards, dealer_cards, p_score, d_score, state)
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(msg_text + '\n')
-        print(f"💾 Сохранено: {msg_text}", flush=True)
-    except Exception as e:
-        print(f"❌ Ошибка записи в {LOG_FILE}: {e}", flush=True)
-
-    # 2) Пишем структурированную запись в отдельный JSON
-    try:
-        record = {
-            "game_num": game_num,
-            "game_id": game_id,
-            "timestamp": datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-            "state": state,
-            "player_cards": player_cards,
-            "dealer_cards": dealer_cards,
-            "p_score": p_score,
-            "d_score": d_score
-        }
-
-        if os.path.exists(LOG_JSON):
-            try:
-                with open(LOG_JSON, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if not isinstance(data, list):
-                    data = []
-            except Exception:
-                data = []
-        else:
-            data = []
-
-        data.append(record)
-
-        with open(LOG_JSON, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        print(f"💾 Игра №{game_num} добавлена в {LOG_JSON} (всего: {len(data)})", flush=True)
-    except Exception as e:
-        print(f"❌ Ошибка записи в {LOG_JSON}: {e}", flush=True)
+# ⚠️ Запись в classic21_games.txt и classic21_games.json ОТКЛЮЧЕНА.
 
 # =====================================================================
 # ФУНКЦИИ
@@ -196,7 +154,6 @@ def is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
     if p_score > 21 or d_score > 21:
         return True
     
-    # Дилер остановился (2+ карты и >= 17) — игра завершена
     if dealer_cards and len(dealer_cards) >= 2 and d_score >= 17:
         return True
     
@@ -285,6 +242,7 @@ def main():
     
     print("🔄 ПАРСЕР 21 CLASSIC ЗАПУЩЕН (ЛАЙВ-РЕЖИМ)", flush=True)
     print(f"🕐 Игры каждые 2 минуты, старт в 03:00", flush=True)
+    print(f"🌐 Зеркало: {BASE_URL}", flush=True)
     print("=" * 60, flush=True)
     
     while True:
@@ -376,8 +334,8 @@ def main():
                         print(f"📤 Новая игра {game_id}: {msg}", flush=True)
                 
                 if is_game_finished(state, player_cards, dealer_cards, p_score, d_score):
-                    # ✅ СОХРАНЯЕМ ИГРУ В ФАЙЛ
-                    save_finished_game(game_number, game_id, player_cards, dealer_cards, p_score, d_score, state)
+                    # ⚠️ ЗАПИСЬ В ФАЙЛЫ ОТКЛЮЧЕНА
+                    # save_finished_game(...) — убрано
                     
                     processed_games.add(game_id)
                     print(f"🏁 Игра {game_id} завершена (state={state}, p_score={p_score}, d_score={d_score})", flush=True)
