@@ -28,7 +28,7 @@ print(f"✅ CHAT_ID: {CHAT_ID}", flush=True)
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 # ⚠️ ИСПРАВЛЕНО: живое зеркало вместо мёртвого 1xlite-6021.pro
-BASE_URL = "https://1xlite-36553.pro"
+BASE_URL = "https://1xlite-8150.pro"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 messages = {}
